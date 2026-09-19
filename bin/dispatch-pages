@@ -1,0 +1,488 @@
+#!/usr/bin/env python3
+"""dispatch-pages：把 HTML 文档发布到静态文档站（如 GitHub Pages），并维护目录页。
+
+发布前先做敏感检查：本机绝对路径、邮箱、疑似密钥、Artifact 专属能力，以及配置的敏感词。
+命中就不发布（退出码 3），把命中项列出来，由用户决定改内容、用 --allow 放行，还是不发。
+
+用法：
+  dispatch-pages url                         打印站点网址
+  dispatch-pages check <文件> [--allow 词,词]  只做发布前检查
+  dispatch-pages publish <文件> [--slug 名称] [--desc 一句话] [--tags a,b] [--project 名称]
+                            [--allow 词,词] [--no-push]
+  dispatch-pages list [-n 条数]               每篇一行：slug │ 日期 │ 标题 │ 摘要
+  dispatch-pages search <词>... [-n 条数]
+  dispatch-pages remove <slug> [--no-push]
+  dispatch-pages rebuild [--no-push]         按 catalog.json 重新生成目录页
+
+配置（~/.claude/dispatch/config）：
+  pages_repo=<站点仓库的本地目录>     pages_url=<站点网址>
+  pages_title=<目录页标题>             pages_deny=<敏感词，逗号分隔>
+
+退出码：0 成功；1 用法或配置错误；3 检查未通过，未发布；4 已提交到本地，但推送失败。
+"""
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import date
+
+CONFIG = os.path.expanduser("~/.claude/dispatch/config")
+
+BLOCK = [
+    ("本机绝对路径", r"/(?:Users|home)/[A-Za-z0-9._-]+/"),
+    ("邮箱", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"),
+    ("疑似密钥", r"sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}"
+                r"|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    ("Artifact 专属能力（站点上无法运行）", r"claude\.use\("),
+]
+WARN = [("私有 Artifact 链接（访客打不开）", r"claude\.ai/(?:code/)?artifact/[A-Za-z0-9-]+")]
+EMAIL_OK = re.compile(r"^(git|noreply|no-reply)@|@(example\.(com|org)|users\.noreply\.github\.com)$", re.I)
+
+
+def fail(msg, code=1):
+    sys.stdout.flush()
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def load_config():
+    cfg = {}
+    if os.path.exists(CONFIG):
+        with open(CONFIG, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*([a-z_]+)\s*=\s*(.*?)\s*$", line)
+                if m and not line.lstrip().startswith("#"):
+                    cfg[m.group(1)] = m.group(2)
+    return cfg
+
+
+CFG = load_config()
+
+
+def repo_dir():
+    d = CFG.get("pages_repo")
+    if not d:
+        fail("未配置文档站：在 ~/.claude/dispatch/config 写入 pages_repo=<站点仓库目录> 和 pages_url=<网址>。")
+    d = os.path.expanduser(d).rstrip("/")
+    if not os.path.isdir(os.path.join(d, ".git")):
+        fail(f"站点仓库不存在或不是 git 仓库：{d}")
+    return d
+
+
+def site_url():
+    return CFG.get("pages_url", "").rstrip("/")
+
+
+def take_opt(args, flag, default=None):
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 >= len(args):
+            fail(f"{flag} 后面缺少值")
+        value = args[i + 1]
+        del args[i:i + 2]
+        return value
+    return default
+
+
+def take_flag(args, flag):
+    if flag in args:
+        args.remove(flag)
+        return True
+    return False
+
+
+def split_list(s):
+    return [x.strip() for x in (s or "").split(",") if x.strip()]
+
+
+# ---------- 检查 ----------
+
+def scan(text, allow):
+    allow = {a.lower() for a in allow}
+    rules = [(name, re.compile(p)) for name, p in BLOCK]
+    for term in split_list(CFG.get("pages_deny")):
+        if re.fullmatch(r"[A-Za-z0-9_.-]+", term):
+            p = r"(?<![A-Za-z0-9])" + re.escape(term) + r"(?![A-Za-z0-9])"
+        else:
+            p = re.escape(term)
+        rules.append((f"敏感词「{term}」", re.compile(p, re.I)))
+    blocks, warns = [], []
+    lines = text.splitlines()
+    for no, line in enumerate(lines, 1):
+        for kind, target, pats in (("block", blocks, rules), ("warn", warns, [(n, re.compile(p)) for n, p in WARN])):
+            for name, rx in pats:
+                for m in rx.finditer(line):
+                    hit = m.group(0)
+                    if hit.lower() in allow or (name == "邮箱" and EMAIL_OK.search(hit)):
+                        continue
+                    s = max(0, m.start() - 20)
+                    ctx = re.sub(r"\s+", " ", line[s:m.end() + 20]).strip()
+                    target.append(f"{no:>5} │ {name} │ {hit} │ …{ctx}…")
+    return blocks, warns
+
+
+def report(blocks, warns):
+    for title, items in (("未通过", blocks), ("提醒", warns)):
+        if items:
+            print(f"── {title}（{len(items)} 处，最多列 20 处）──")
+            for x in items[:20]:
+                print(x[:220])
+
+
+# ---------- 页面 ----------
+
+HEAD_TAG = re.compile(r"\s*(<title>.*?</title>|<meta\b[^>]*>|<link\b[^>]*>)", re.S | re.I)
+
+BASE_STYLE = (":root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);"
+              "padding-bottom:env(safe-area-inset-bottom,0px)}"
+              "body{margin:0;font:14px/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;background:#fafaf9}"
+              "img{max-width:100%}[hidden]{display:none!important}")
+
+
+def wrap(src, desc):
+    """Artifact 页面只有正文片段（外壳由平台补），这里补成完整文档。已经是完整文档的原样返回。"""
+    if re.match(r"\s*(<!doctype|<html)", src, re.I):
+        return src
+    head, rest = [], src
+    while True:
+        m = HEAD_TAG.match(rest)
+        if not m:
+            break
+        head.append(m.group(1))
+        rest = rest[m.end():]
+    meta = f'<meta name="description" content="{html.escape(desc)}">\n' if desc else ""
+    return (
+        "<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n"
+        f"{meta}<link rel=\"index\" href=\"../../\">\n" + "\n".join(head) +
+        f"\n<style>{BASE_STYLE}</style>\n</head>\n<body>\n{rest.strip()}\n</body>\n</html>\n"
+    )
+
+
+def page_title(src, fallback):
+    m = re.search(r"<title>(.*?)</title>", src, re.S | re.I)
+    return html.unescape(m.group(1)).strip() if m else fallback
+
+
+def page_desc(src):
+    m = re.search(r'<meta\s+name="description"\s+content="([^"]*)"', src, re.I)
+    return html.unescape(m.group(1)).strip() if m else ""
+
+
+# ---------- 目录 ----------
+
+def load_catalog(repo):
+    p = os.path.join(repo, "catalog.json")
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    return {"pages": []}
+
+
+def save_catalog(repo, cat):
+    cat["pages"].sort(key=lambda x: (x.get("updated", ""), x["slug"]), reverse=True)
+    with open(os.path.join(repo, "catalog.json"), "w", encoding="utf-8") as f:
+        json.dump(cat, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+INDEX_CSS = """
+:root{--ground:#F3F4F6;--paper:#FFFFFF;--ink:#161A21;--muted:#5B6372;--rule:#DADDE3;--chip:#E4E8F2;--chip-ink:#2E4893;--accent:#4865AA;
+--serif:"Noto Serif SC","Songti SC",serif;--sans:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;--mono:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--ground:#12151B;--paper:#1A1E26;--ink:#E5E8EE;--muted:#9AA2B1;--rule:#2C323D;--chip:#222B3D;--chip-ink:#AFC1EA;--accent:#95ABDB}}
+*{box-sizing:border-box}
+html{color-scheme:light dark}
+body{margin:0;background:var(--ground);color:var(--ink);font:15.5px/1.75 var(--sans);padding-inline:20px;padding-block:0 80px}
+main{max-width:760px;margin:0 auto}
+header{padding-block:56px 28px;border-bottom:1px solid var(--rule)}
+.eyebrow{font:600 11.5px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+h1{font:900 clamp(30px,5vw,42px)/1.2 var(--serif);margin:12px 0 10px;text-wrap:balance}
+.lede{color:var(--muted);margin:0}
+.ramp{display:flex;gap:3px;margin-top:20px;height:6px;max-width:260px}
+.ramp i{flex:1;border-radius:1px}
+.controls{display:grid;gap:12px;padding-block:22px 6px}
+#q{width:100%;font:15px var(--sans);padding:10px 12px;border:1px solid var(--rule);border-radius:6px;background:var(--paper);color:var(--ink)}
+#q:focus-visible,.tag:focus-visible,.doc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tags{display:flex;flex-wrap:wrap;gap:6px}
+.tag{font:500 12px/1 var(--mono);padding:6px 9px;border-radius:999px;border:1px solid var(--rule);background:var(--paper);color:var(--muted);cursor:pointer}
+.tag[aria-pressed="true"]{background:var(--chip-ink);border-color:var(--chip-ink);color:var(--paper)}
+ol.docs{list-style:none;margin:10px 0 0;padding:0}
+.doc{border-top:1px solid var(--rule);padding:18px 0}
+.doc a{font:700 18px/1.45 var(--serif);color:var(--ink);text-decoration:none}
+.doc a:hover{color:var(--accent)}
+.doc p{margin:4px 0 8px;color:var(--muted);font-size:14.5px}
+.meta{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;font:500 12px/1.4 var(--mono);color:var(--muted)}
+.meta span.t{background:var(--chip);color:var(--chip-ink);padding:2px 7px;border-radius:3px}
+.empty{color:var(--muted);padding:24px 0}
+footer{margin-top:28px;font-size:12.5px;color:var(--muted)}
+"""
+
+INDEX_JS = """
+const q=document.getElementById('q'),docs=[...document.querySelectorAll('.doc')],tags=[...document.querySelectorAll('.tag')],empty=document.getElementById('empty');
+let on=new Set();
+function apply(){const s=q.value.trim().toLowerCase();let n=0;
+for(const d of docs){const ok=(!s||d.dataset.text.includes(s))&&[...on].every(t=>d.dataset.tags.split('|').includes(t));d.hidden=!ok;if(ok)n++}
+empty.hidden=n>0}
+q.addEventListener('input',apply);
+for(const b of tags)b.addEventListener('click',()=>{const t=b.dataset.tag;on.has(t)?on.delete(t):on.add(t);b.setAttribute('aria-pressed',on.has(t));apply()});
+"""
+
+
+def build_index(repo, cat):
+    title = CFG.get("pages_title", "文档")
+    pages = cat["pages"]
+    all_tags = sorted({t for p in pages for t in p.get("tags", [])}, key=lambda t: (-sum(t in p.get("tags", []) for p in pages), t))
+    e = html.escape
+    items = []
+    for p in pages:
+        tags = p.get("tags", [])
+        text = " ".join([p["title"], p.get("description", ""), p.get("project", ""), " ".join(tags), p["slug"]]).lower()
+        meta = [f"<span>{e(p.get('updated', ''))}</span>"]
+        if p.get("project"):
+            meta.append(f"<span>{e(p['project'])}</span>")
+        meta += [f'<span class="t">{e(t)}</span>' for t in tags]
+        items.append(
+            f'<li class="doc" data-text="{e(text)}" data-tags="{e("|".join(tags))}">'
+            f'<a href="p/{e(p["slug"])}/">{e(p["title"])}</a>'
+            + (f"<p>{e(p['description'])}</p>" if p.get("description") else "")
+            + f'<div class="meta">{"".join(meta)}</div></li>'
+        )
+    tag_buttons = "".join(f'<button class="tag" type="button" data-tag="{e(t)}" aria-pressed="false">{e(t)}</button>' for t in all_tags)
+    latest = pages[0].get("updated", "") if pages else ""
+    doc = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{e(title)}</title>
+<meta name="description" content="{e(title)}：{len(pages)} 篇 HTML 文档">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@700;900&family=Noto+Sans+SC:wght@400;500&family=JetBrains+Mono:wght@500;600&display=swap">
+<style>{INDEX_CSS}</style>
+</head>
+<body>
+<main>
+<header>
+<span class="eyebrow">文档站 · {len(pages)} 篇</span>
+<h1>{e(title)}</h1>
+<p class="lede">和 Claude Code 一起写下的方案、手册和调研，定稿后发布在这里。</p>
+<div class="ramp" aria-hidden="true"><i style="background:#8E97AA"></i><i style="background:#6680B3"></i><i style="background:#4865AA"></i><i style="background:#2E4893"></i><i style="background:#1B2D6A"></i></div>
+</header>
+<div class="controls">
+<input id="q" type="search" placeholder="搜索标题、摘要、标签" aria-label="搜索文档">
+<div class="tags">{tag_buttons}</div>
+</div>
+<ol class="docs">{"".join(items)}</ol>
+<p class="empty" id="empty" hidden>没有匹配的文档。</p>
+<footer>最近更新 {e(latest)}</footer>
+</main>
+<script>{INDEX_JS}</script>
+</body>
+</html>
+"""
+    with open(os.path.join(repo, "index.html"), "w", encoding="utf-8") as f:
+        f.write(doc)
+    nojekyll = os.path.join(repo, ".nojekyll")
+    if not os.path.exists(nojekyll):
+        open(nojekyll, "w").close()
+
+
+# ---------- git ----------
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+
+
+def commit_and_push(repo, message, push):
+    git(repo, "add", "-A")
+    if git(repo, "diff", "--cached", "--quiet").returncode == 0:
+        print("没有变化，无需提交。")
+        return
+    r = git(repo, "commit", "-m", message)
+    if r.returncode != 0:
+        fail("提交失败：" + (r.stderr or r.stdout).strip()[-400:])
+    if not push:
+        print("已提交到本地（--no-push，未推送）。")
+        return
+    if not git(repo, "remote").stdout.strip():
+        fail("已提交到本地，但仓库没有配置远程地址，未推送。", 4)
+    r = git(repo, "push", "-u", "origin", "HEAD")
+    if r.returncode != 0:
+        fail("已提交到本地，推送失败：" + (r.stderr or r.stdout).strip()[-400:], 4)
+
+
+# ---------- 子命令 ----------
+
+def cmd_check(args):
+    allow = split_list(take_opt(args, "--allow"))
+    if not args:
+        fail("用法：dispatch-pages check <文件> [--allow 词,词]")
+    with open(args[0], encoding="utf-8") as f:
+        text = f.read()
+    blocks, warns = scan(text, allow)
+    report(blocks, warns)
+    if blocks:
+        fail("✘ 检查未通过，不能发布。", 3)
+    print("✔ 检查通过" + ("（有提醒，见上）" if warns else ""))
+
+
+def cmd_publish(args):
+    slug = take_opt(args, "--slug")
+    desc = take_opt(args, "--desc")
+    tags = take_opt(args, "--tags")
+    project = take_opt(args, "--project")
+    allow = split_list(take_opt(args, "--allow"))
+    push = not take_flag(args, "--no-push")
+    if not args:
+        fail("用法：dispatch-pages publish <文件> [--slug 名称] [--desc 一句话] [--tags a,b] [--project 名称] [--allow 词,词] [--no-push]")
+    src_path = args[0]
+    with open(src_path, encoding="utf-8") as f:
+        src = f.read()
+    slug = slug or os.path.splitext(os.path.basename(src_path))[0]
+    slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower()).strip("-")
+    if not slug:
+        fail("无法从文件名得到英文 slug，请用 --slug 指定，例如 --slug dispatch-manual")
+
+    blocks, warns = scan(src, allow)
+    report(blocks, warns)
+    if blocks:
+        fail("✘ 检查未通过，未发布。改掉命中的内容，或确认无妨后用 --allow 放行。", 3)
+
+    repo = repo_dir()
+    cat = load_catalog(repo)
+    old = next((p for p in cat["pages"] if p["slug"] == slug), None)
+    today = date.today().isoformat()
+    entry = {
+        "slug": slug,
+        "title": page_title(src, slug),
+        "description": desc if desc is not None else (page_desc(src) or (old or {}).get("description", "")),
+        "tags": split_list(tags) if tags is not None else (old or {}).get("tags", []),
+        "project": project if project is not None else (old or {}).get("project", ""),
+        "created": (old or {}).get("created", today),
+        "updated": today,
+    }
+    cat["pages"] = [p for p in cat["pages"] if p["slug"] != slug] + [entry]
+
+    out_dir = os.path.join(repo, "p", slug)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
+        f.write(wrap(src, entry["description"]))
+    save_catalog(repo, cat)
+    build_index(repo, cat)
+    commit_and_push(repo, f"{'更新' if old else '发布'}：{entry['title']}", push)
+    url = f"{site_url()}/p/{slug}/" if site_url() else f"p/{slug}/"
+    print(f"✔ {'已更新' if old else '已发布'}：{entry['title']}\n  网址：{url}\n  目录：{site_url() or repo}/")
+
+
+def row(p):
+    d = p.get("description", "")
+    d = d[:60] + "…" if len(d) > 60 else d
+    return f"{p['slug']} │ {p.get('updated', '')} │ {p['title']} │ {d}"
+
+
+def cmd_list(args):
+    limit = int(take_opt(args, "-n", "20"))
+    pages = load_catalog(repo_dir())["pages"]
+    for p in pages[:limit]:
+        print(row(p))
+    if len(pages) > limit:
+        print(f"……共 {len(pages)} 篇，只列出前 {limit} 篇（用 -n 调整）")
+    if not pages:
+        print("还没有发布任何文档。")
+
+
+def cmd_search(args):
+    limit = int(take_opt(args, "-n", "10"))
+    terms = [t.lower() for t in args if t.strip()]
+    if not terms:
+        fail("用法：dispatch-pages search <词>... [-n 条数]")
+    hits = []
+    for p in load_catalog(repo_dir())["pages"]:
+        text = " ".join([p["slug"], p["title"], p.get("description", ""), p.get("project", ""), " ".join(p.get("tags", []))]).lower()
+        n = sum(t in text for t in terms)
+        if n:
+            hits.append((-n, p))
+    hits.sort(key=lambda x: x[0])
+    if not hits:
+        print("没有找到相关文档。")
+    for _, p in hits[:limit]:
+        print(row(p))
+
+
+def cmd_remove(args):
+    push = not take_flag(args, "--no-push")
+    if not args:
+        fail("用法：dispatch-pages remove <slug>")
+    repo, slug = repo_dir(), args[0]
+    cat = load_catalog(repo)
+    old = next((p for p in cat["pages"] if p["slug"] == slug), None)
+    if not old:
+        fail(f"没有这篇文档：{slug}")
+    cat["pages"] = [p for p in cat["pages"] if p["slug"] != slug]
+    shutil.rmtree(os.path.join(repo, "p", slug), ignore_errors=True)
+    save_catalog(repo, cat)
+    build_index(repo, cat)
+    commit_and_push(repo, f"下线：{old['title']}", push)
+    print(f"✔ 已下线：{old['title']}")
+
+
+def cmd_rebuild(args):
+    push = not take_flag(args, "--no-push")
+    repo = repo_dir()
+    cat = load_catalog(repo)
+    save_catalog(repo, cat)
+    build_index(repo, cat)
+    commit_and_push(repo, "重建目录页", push)
+    print(f"✔ 目录页已重建（{len(cat['pages'])} 篇）")
+
+
+def cmd_hook(_args):
+    """PostToolUse(Artifact) 调用：页面发布后，提示主会话把它同步发布到文档站。没配置文档站时什么也不输出。"""
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        return
+    ti = data.get("tool_input") or {}
+    path = ti.get("file_path") or ""
+    if ti.get("action") not in (None, "", "publish") or not path.lower().endswith((".html", ".htm")):
+        return
+    if not CFG.get("pages_repo"):
+        return
+    slug = re.sub(r"[^a-z0-9-]+", "-", os.path.splitext(os.path.basename(path))[0].lower()).strip("-")
+    repo = os.path.expanduser(CFG["pages_repo"])
+    old = None
+    if slug and os.path.isdir(repo):
+        old = next((p for p in load_catalog(repo)["pages"] if p["slug"] == slug), None)
+    cmd = f'dispatch-pages publish "{path}" --slug {slug or "<英文短名>"}'
+    if old:
+        todo = f"这是已发布文档「{old['title']}」的更新：执行 `{cmd}`（摘要和标签不变就不用再传）。"
+    else:
+        todo = f'执行 `{cmd} --desc "<一句话摘要>" --tags <3–5 个标签> [--project <项目>]`。'
+    msg = (f"文档站：这个 HTML 页面需要同步发布到公开站点 {site_url() or repo}，用户已授权自动发布，不用再问。{todo}"
+           "回复里给出网址。退出码 3 表示敏感检查未通过：停下，把命中项给用户看，由用户决定改内容、--allow 放行还是不发。")
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}, ensure_ascii=False))
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    cmd, rest = args[0], args[1:]
+    if cmd == "url":
+        repo_dir()
+        print(site_url())
+        return
+    handlers = {"check": cmd_check, "publish": cmd_publish, "list": cmd_list,
+                "search": cmd_search, "remove": cmd_remove, "rebuild": cmd_rebuild, "hook": cmd_hook}
+    if cmd not in handlers:
+        fail(f"未知子命令：{cmd}（可用：url、check、publish、list、search、remove、rebuild）")
+    handlers[cmd](rest)
+
+
+if __name__ == "__main__":
+    main()

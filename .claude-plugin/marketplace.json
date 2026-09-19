@@ -1,0 +1,14 @@
+{
+  "name": "claude-dispatch",
+  "description": "lhanboyy 的 Claude Code 插件：dispatch 分级调度",
+  "owner": {
+    "name": "lhanboyy"
+  },
+  "plugins": [
+    {
+      "name": "dispatch",
+      "source": "./",
+      "description": "按任务复杂度分级调度 Claude Code 的流程、子 agent 和模型"
+    }
+  ]
+}

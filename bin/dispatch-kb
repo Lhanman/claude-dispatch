@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""dispatch-kb：用尽量少的输出检索个人知识库（按目录组织的 Markdown 笔记）。
+
+每篇笔记只回一行（路径 │ 类型 │ 日期 │ 摘要），先靠这一行判断要不要打开；
+要打开时先看 outline，再只读需要的小节。整篇笔记不进上下文。
+
+用法：
+  dispatch-kb path                          打印知识库目录
+  dispatch-kb dirs                          列出顶层目录和各自的笔记数
+  dispatch-kb search <词>... [-d 子目录] [-n 条数]
+                                            按关键词找笔记（多个词取并集，命中词多的排前）
+  dispatch-kb list [子目录] [-n 条数]         列出笔记
+  dispatch-kb outline <笔记路径>              打印摘要和标题大纲（带行号）
+
+配置：环境变量 DISPATCH_KB_DIR，或 ~/.claude/dispatch/config 里的
+  kb_dir=<知识库目录>
+  kb_exclude=<不参与检索的顶层目录，逗号分隔>
+"""
+import os
+import re
+import sys
+from datetime import date
+
+CONFIG = os.path.expanduser("~/.claude/dispatch/config")
+SUMMARY_WIDTH = 70
+
+
+def load_config():
+    cfg = {}
+    if os.path.exists(CONFIG):
+        with open(CONFIG, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*([a-z_]+)\s*=\s*(.*?)\s*$", line)
+                if m and not line.lstrip().startswith("#"):
+                    cfg[m.group(1)] = m.group(2)
+    if os.environ.get("DISPATCH_KB_DIR"):
+        cfg["kb_dir"] = os.environ["DISPATCH_KB_DIR"]
+    return cfg
+
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+CFG = load_config()
+
+
+def kb_dir():
+    d = CFG.get("kb_dir")
+    if not d:
+        fail("未配置知识库：在 ~/.claude/dispatch/config 写入 kb_dir=<目录>，或设置环境变量 DISPATCH_KB_DIR。")
+    d = os.path.expanduser(d)
+    if not os.path.isdir(d):
+        fail(f"知识库目录不存在：{d}")
+    return d.rstrip("/")
+
+
+def excluded():
+    return {x.strip().strip("/") for x in CFG.get("kb_exclude", "").split(",") if x.strip()}
+
+
+def notes(root, sub=None):
+    base = os.path.join(root, sub) if sub else root
+    if not os.path.isdir(base):
+        fail(f"目录不存在：{base}")
+    skip = excluded()
+    for dirpath, dirnames, filenames in os.walk(base):
+        rel_dir = os.path.relpath(dirpath, root)
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if not d.startswith(".") and not (rel_dir == "." and d in skip)
+        )
+        for name in sorted(filenames):
+            if name.endswith(".md") and name != ".md":
+                yield os.path.join(dirpath, name)
+
+
+def parse(path):
+    """返回 (元数据, 全文, 行列表)。没有 frontmatter 的笔记，用一级标题和第一段正文补 title / summary。"""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    lines = text.splitlines()
+    meta, start = {}, 0
+    if lines and lines[0].strip() == "---":
+        for i in range(1, min(len(lines), 80)):
+            if lines[i].strip() == "---":
+                start = i + 1
+                break
+            m = re.match(r"([A-Za-z_]+)\s*:\s*(.*)", lines[i])
+            if m:
+                meta[m.group(1).lower()] = m.group(2).strip().strip("\"'")
+    in_code = False
+    for line in lines[start:start + 60]:
+        s = line.strip()
+        if s.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code or not s or s.startswith(("|", "---", "<")):
+            continue
+        if s.startswith("# ") and "title" not in meta:
+            meta["title"] = s[2:].strip()
+            continue
+        if s.startswith("#"):
+            continue
+        if "summary" not in meta:
+            meta["summary"] = re.sub(r"^([>*\-+]\s*|\d+\.\s+)+", "", s).replace("**", "")
+        if "title" in meta and "summary" in meta:
+            break
+    return meta, text, lines
+
+
+def when(path, meta):
+    d = meta.get("updated") or meta.get("created")
+    if d:
+        return d[:10]
+    return date.fromtimestamp(os.path.getmtime(path)).isoformat()
+
+
+def row(root, path, meta):
+    summary = meta.get("summary", "")
+    if len(summary) > SUMMARY_WIDTH:
+        summary = summary[:SUMMARY_WIDTH] + "…"
+    rel = os.path.relpath(path, root)
+    return f"{rel} │ {meta.get('type', '-')} │ {when(path, meta)} │ {summary}"
+
+
+def take_opt(args, flag, default):
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 >= len(args):
+            fail(f"{flag} 后面缺少值")
+        value = args[i + 1]
+        del args[i:i + 2]
+        return value
+    return default
+
+
+def cmd_dirs(root):
+    skip = excluded()
+    counts = {}
+    for p in notes(root):
+        top = os.path.relpath(p, root).split(os.sep)[0]
+        top = top if os.path.isdir(os.path.join(root, top)) else "（根目录）"
+        counts[top] = counts.get(top, 0) + 1
+    for name, n in sorted(counts.items()):
+        print(f"{name}/ │ {n} 篇" if name != "（根目录）" else f"{name} │ {n} 篇")
+    if skip:
+        print(f"（已排除：{', '.join(sorted(skip))}）")
+
+
+def cmd_list(root, args):
+    limit = int(take_opt(args, "-n", "20"))
+    sub = args[0] if args else None
+    found = [(p, parse(p)) for p in notes(root, sub)]
+    found = [(p, r[0]) for p, r in found if r]
+    for p, meta in found[:limit]:
+        print(row(root, p, meta))
+    if len(found) > limit:
+        print(f"……共 {len(found)} 篇，只列出前 {limit} 篇（用 -n 调整）")
+
+
+def cmd_search(root, args):
+    sub = take_opt(args, "-d", None)
+    limit = int(take_opt(args, "-n", "10"))
+    terms = [t.lower() for t in args if t.strip()]
+    if not terms:
+        fail("用法：dispatch-kb search <词>... [-d 子目录] [-n 条数]")
+    hits = []
+    for p in notes(root, sub):
+        parsed = parse(p)
+        if not parsed:
+            continue
+        meta, text, _ = parsed
+        rel = os.path.relpath(p, root)
+        head = " ".join([rel, meta.get("title", ""), meta.get("summary", ""), meta.get("tags", ""), meta.get("type", "")]).lower()
+        body = text.lower()
+        matched, score = 0, 0
+        for t in terms:
+            n = body.count(t)
+            in_head = t in head
+            if in_head or n:
+                matched += 1
+                score += (10 if in_head else 0) + min(n, 5)
+        if matched:
+            hits.append((-matched, -score, rel, p, meta))
+    hits.sort()
+    if not hits:
+        print("没有找到相关笔记。")
+        return
+    print(f"找到 {len(hits)} 篇" + (f"，显示前 {limit} 篇" if len(hits) > limit else "") + "（路径 │ 类型 │ 日期 │ 摘要）：")
+    for _, _, _, p, meta in hits[:limit]:
+        print(row(root, p, meta))
+
+
+def cmd_outline(root, args):
+    if not args:
+        fail("用法：dispatch-kb outline <笔记路径>")
+    path = args[0] if os.path.isabs(args[0]) else os.path.join(root, args[0])
+    parsed = parse(path)
+    if not parsed:
+        fail(f"读不到笔记：{path}")
+    meta, _, lines = parsed
+    print(f"{row(root, path, meta)} │ 共 {len(lines)} 行")
+    if meta.get("tags"):
+        print(f"tags: {meta['tags']}")
+    in_code = False
+    for i, line in enumerate(lines, 1):
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        m = re.match(r"(#{1,3})\s+(.*)", line)
+        if m and not in_code:
+            print(f"{i:>5}  {'  ' * (len(m.group(1)) - 1)}{m.group(2).strip()}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    cmd, rest = args[0], args[1:]
+    root = kb_dir()
+    if cmd == "path":
+        print(root)
+    elif cmd == "dirs":
+        cmd_dirs(root)
+    elif cmd == "list":
+        cmd_list(root, rest)
+    elif cmd == "search":
+        cmd_search(root, rest)
+    elif cmd == "outline":
+        cmd_outline(root, rest)
+    else:
+        fail(f"未知子命令：{cmd}（可用：path、dirs、search、list、outline）")
+
+
+if __name__ == "__main__":
+    main()
