@@ -15,11 +15,14 @@
 | L4 史诗 | 新子系统或大改造 | 先定架构决策 → 拆成多个 L3 |
 
 - 级别按**风险最高的那个信号**定，不按平均值。
-- L1 起，回复第一行会写判定和依据，例如 `〔L2 · 新增依赖 + 跨两个模块〕`。L0 和非开发类请求（问答、调研、写文档）不写判定行。
+- L1 起，回复第一行会写判定和依据，例如 `〔L2 · 新增依赖 + 跨两个模块〕`。L0 和非开发类请求（问答、调研、写文档、脑暴）不写判定行。
+- 要脑暴时说「脑暴一下……」或执行 `/dispatch:brainstorm`：先框定问题，发散 8–12 个不同角度的想法，归成 3–4 个方向对比价值、成本和风险，再收敛到 1–2 个推荐方向；要落地就转入对应级别的流程，要留存就写成笔记或 HTML 文档。
 - L0–L2 判定后直接执行；L3 以上先征得你同意。
 - 执行中发现任务变大或变小，会升级或降级，并说明原因。完整规则见 [`router/ROUTER.md`](router/ROUTER.md)。
 
-**手动指定级别**：在消息里任意位置写 `#L0`–`#L4`，例如 `#L1 修一下分页越界`。每次手动指定都会在 `~/.claude/dispatch/overrides.log` 记一行（时间、级别、目录）。它反映自动判定哪里不准，可以拿来修订 `ROUTER.md`。
+**手动指定级别**：在消息里任意位置写 `#L0`–`#L4`，例如 `#L1 修一下分页越界`。你指定的级别是下限：不会降到它以下；执行中出现升级信号时，会先停下说明原因和建议级别，你回复 `#L3` 这样的标记确认后才升级，判定行写成 `〔L1→L3 · 用户确认〕`。
+
+每次手动指定（包括升级确认）都会在 `~/.claude/dispatch/overrides.log` 记一行：时间、级别、目录、本会话上一次指定的级别。它反映自动判定哪里不准，可以拿来修订 `ROUTER.md`。
 
 ## 模型与子 agent
 
@@ -100,6 +103,12 @@ dispatch-kb outline 订单系统/订单导出改为分批流式写出.md  # 摘�
 # 然后只读需要的那一节
 ```
 
+检索的规则：
+
+- 同一个概念的几种说法用 `|` 连成一个词，例如 `报错|故障|异常`，任一说法命中都算；
+- 只列命中词数最多、分数不低于第一名 1/4 的结果；长笔记按篇幅打折，不因篇幅长而靠前；
+- 同一篇的多个版本（简版、修订版、v2、终版……）只显示最新的一篇并注明「另有 N 个版本」，加 `--all` 查看全部。
+
 另有 `dispatch-kb dirs`（顶层目录和笔记数）和 `dispatch-kb list [子目录]`。
 
 **写**：L3 归档后，或 L2 得出值得保留的方案、决策、根因时，会提议执行 `/dispatch:note`。写入前一定先给你看路径和要点，你确认后才写。笔记格式固定，方便检索：
@@ -121,6 +130,8 @@ pages_repo=~/sites/me.github.io   # 站点仓库的本地目录（需要配置�
 pages_url=https://me.github.io    # 站点网址
 pages_title=我的文档               # 目录页标题
 pages_deny=公司名,内部项目名         # 发布前拦截的敏感词
+pages_docs_dir=文档                # 文档根目录（可选，默认「文档」）
+pages_misc=其他                    # 没有项目时放的目录（可选，默认「其他」）
 ```
 
 **发布**：
@@ -129,7 +140,11 @@ pages_deny=公司名,内部项目名         # 发布前拦截的敏感词
 dispatch-pages publish page.html --slug my-page --desc "一句话摘要" --tags 标签1,标签2 --project 项目
 ```
 
-脚本会依次：做敏感检查 → 补全 HTML 外壳（Artifact 页面没有 `<head>`）→ 写入 `p/<slug>/index.html` → 更新 `catalog.json` 和目录页 → 提交并推送。同一个 slug 再次发布就是更新。
+脚本会依次：做敏感检查 → 补全 HTML 外壳（Artifact 页面没有 `<head>`）→ 写入 `文档/<项目>/<标题>.html` → 更新 `catalog.json`、目录页和仓库 README → 提交并推送。
+
+文件按项目分目录、用中文标题命名，在本地也能一眼找到；不属于任何项目的放在 `文档/其他/`。slug 是每篇文档不变的英文标识，同一个 slug 再次发布就是更新；标题或项目变了，文件会跟着改名或换目录。
+
+**网址用英文**：线上网址一律是 `<站点>/p/<slug>/`，不会出现中文路径。脚本会在站点仓库里生成 `.github/workflows/pages.yml` 和 `.github/build-site.py`，推送后由 GitHub Actions 按 `catalog.json` 把中文路径的文档复制成 `p/<slug>/index.html` 再上线。第一次使用前，要在站点仓库的 Settings → Pages → Source 选择 **GitHub Actions**。
 
 **敏感检查**：本机绝对路径、邮箱、疑似密钥、`pages_deny` 里的词，以及用到 Artifact 专属能力（`claude.use`）的页面，命中就不发布，退出码 3。确认无妨后用 `--allow 词,词` 放行。私有 Artifact 链接只提醒，不拦截。
 
@@ -141,7 +156,7 @@ dispatch-pages publish page.html --slug my-page --desc "一句话摘要" --tags 
 
 ## 常驻开销
 
-每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token），加上各 skill 和 agent 的一行描述。查看实测值：
+每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token；合计约 2.3k），加上各 skill 和 agent 的一行描述。查看实测值：
 
 ```bash
 claude plugin details dispatch
@@ -157,7 +172,7 @@ router/           ROUTER.md 路由规则；KB.md、PAGES.md 知识库和文档�
 hooks/            hooks.json；session-start.sh 注入规则；prompt-submit.sh 识别 #L0–#L4；Artifact 发布后提示同步到文档站
 bin/              dispatch-verify、dispatch-kb、dispatch-pages，插件启用期间自动加入 PATH
 agents/           scout、reviewer、builder
-skills/           setup、note、grill-me、grilling、test-driven-development、systematic-debugging
+skills/           setup、note、brainstorm、grill-me、grilling、test-driven-development、systematic-debugging
 ```
 
 ## 依赖

@@ -7,8 +7,10 @@
 用法：
   dispatch-kb path                          打印知识库目录
   dispatch-kb dirs                          列出顶层目录和各自的笔记数
-  dispatch-kb search <词>... [-d 子目录] [-n 条数]
-                                            按关键词找笔记（多个词取并集，命中词多的排前）
+  dispatch-kb search <词>... [-d 子目录] [-n 条数] [--all]
+                                            按关键词找笔记。同一概念的几种说法用 | 连成一个词（报错|故障）；
+                                            只列命中词数最多、分数接近第一名的结果；
+                                            同一篇的多个版本（简版、修订版、终版……）只显示最新的，--all 看全部
   dispatch-kb list [子目录] [-n 条数]         列出笔记
   dispatch-kb outline <笔记路径>              打印摘要和标题大纲（带行号）
 
@@ -152,23 +154,85 @@ def cmd_dirs(root):
         print(f"（已排除：{', '.join(sorted(skip))}）")
 
 
+# 同一篇笔记的多个版本（简版、修订版、v2、终版……）：检索时只显示最"新"的一篇
+VERSION_TAG = re.compile(r"[\s\-_（(]*(终版|最终版|定稿|修订版|简版|初稿|草稿|副本|final|draft|copy|(?<![A-Za-z])v\d+)[\s)）]*$", re.I)
+
+
+def version_key(path):
+    """返回 (同目录, 去掉版本标记的文件名, 版本优先级)。终版 > vN > 修订版 > 无标记 > 简版/初稿。"""
+    name = os.path.splitext(os.path.basename(path))[0]
+    rank, first = 3, True
+    while True:
+        m = VERSION_TAG.search(name)
+        if not m:
+            break
+        tag = m.group(1).lower()
+        if first:
+            if tag in ("终版", "最终版", "定稿", "final"):
+                rank = 100
+            elif re.fullmatch(r"v\d+", tag):
+                rank = 10 + int(tag[1:])
+            elif tag == "修订版":
+                rank = 5
+            elif tag in ("简版", "初稿", "草稿", "draft"):
+                rank = 1
+            else:
+                rank = 2
+            first = False
+        name = name[:m.start()]
+    return os.path.dirname(path), name.strip(" -_"), rank
+
+
+def fold_versions(items):
+    """items：[(分数, 路径, meta)]，已按分数从高到低排好。同一篇的多个版本合成一条：
+    位置取组内最高分，显示版本优先级最高的那篇，并返回其余版本数。"""
+    groups, order = {}, []
+    for score, path, meta in items:
+        d, stem, rank = version_key(path)
+        key = (d, stem) if stem else (path,)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((rank, os.path.getmtime(path), score, path, meta))
+    out = []
+    for key in order:
+        g = groups[key]
+        best = max(g, key=lambda x: (x[0], x[1]))
+        out.append((best[3], best[4], len(g) - 1))
+    return out
+
+
+def fmt_rows(root, folded):
+    return [row(root, p, meta) + (f"（另有 {n} 个版本，加 --all 查看）" if n else "") for p, meta, n in folded]
+
+
 def cmd_list(root, args):
     limit = int(take_opt(args, "-n", "20"))
+    show_all = "--all" in args
+    args = [a for a in args if a != "--all"]
     sub = args[0] if args else None
     found = [(p, parse(p)) for p in notes(root, sub)]
-    found = [(p, r[0]) for p, r in found if r]
-    for p, meta in found[:limit]:
-        print(row(root, p, meta))
-    if len(found) > limit:
-        print(f"……共 {len(found)} 篇，只列出前 {limit} 篇（用 -n 调整）")
+    items = [(0, p, r[0]) for p, r in found if r]
+    folded = [(p, m, 0) for _, p, m in items] if show_all else fold_versions(items)
+    for line in fmt_rows(root, folded[:limit]):
+        print(line)
+    if len(folded) > limit:
+        print(f"……共 {len(folded)} 篇，只列出前 {limit} 篇（用 -n 调整）")
+
+
+def term_variants(t):
+    """「报错|故障|异常」表示同一个概念的几种说法，命中任意一种都算命中这个词。"""
+    return [v for v in t.lower().split("|") if v]
 
 
 def cmd_search(root, args):
     sub = take_opt(args, "-d", None)
     limit = int(take_opt(args, "-n", "10"))
-    terms = [t.lower() for t in args if t.strip()]
+    show_all = "--all" in args
+    terms = [term_variants(t) for t in args if t.strip() and t != "--all"]
+    terms = [t for t in terms if t]
     if not terms:
-        fail("用法：dispatch-kb search <词>... [-d 子目录] [-n 条数]")
+        fail("用法：dispatch-kb search <词>... [-d 子目录] [-n 条数] [--all]（同义词用 | 连接，如 报错|故障）")
     hits = []
     for p in notes(root, sub):
         parsed = parse(p)
@@ -178,22 +242,32 @@ def cmd_search(root, args):
         rel = os.path.relpath(p, root)
         head = " ".join([rel, meta.get("title", ""), meta.get("summary", ""), meta.get("tags", ""), meta.get("type", "")]).lower()
         body = text.lower()
-        matched, score = 0, 0
-        for t in terms:
-            n = body.count(t)
-            in_head = t in head
+        # 长笔记按篇幅打折，避免只因为篇幅长、出现次数多就排到前面
+        norm = min(1.0, (3000 / max(len(body), 1)) ** 0.5)
+        matched, score = 0, 0.0
+        for variants in terms:
+            n = max(body.count(v) for v in variants)
+            in_head = any(v in head for v in variants)
             if in_head or n:
                 matched += 1
-                score += (10 if in_head else 0) + min(n, 5)
+                score += (10 if in_head else 0) + min(n, 5) * norm
         if matched:
-            hits.append((-matched, -score, rel, p, meta))
-    hits.sort()
+            hits.append((matched, score, rel, p, meta))
     if not hits:
         print("没有找到相关笔记。")
         return
-    print(f"找到 {len(hits)} 篇" + (f"，显示前 {limit} 篇" if len(hits) > limit else "") + "（路径 │ 类型 │ 日期 │ 摘要）：")
-    for _, _, _, p, meta in hits[:limit]:
-        print(row(root, p, meta))
+    # 截尾：只留命中词数最多的那一档，且分数不低于第一名的 1/4
+    top_matched = max(h[0] for h in hits)
+    hits = [h for h in hits if h[0] == top_matched]
+    hits.sort(key=lambda h: (-h[1], h[2]))
+    top_score = hits[0][1]
+    hits = [h for h in hits if h[1] >= top_score / 4]
+    items = [(s, p, meta) for _, s, _, p, meta in hits]
+    folded = [(p, m, 0) for _, p, m in items] if show_all else fold_versions(items)
+    note = f"命中全部 {len(terms)} 个词" if top_matched == len(terms) else f"最多命中 {top_matched}/{len(terms)} 个词"
+    print(f"找到 {len(folded)} 篇，{note}" + (f"，显示前 {limit} 篇" if len(folded) > limit else "") + "（路径 │ 类型 │ 日期 │ 摘要）：")
+    for line in fmt_rows(root, folded[:limit]):
+        print(line)
 
 
 def cmd_outline(root, args):

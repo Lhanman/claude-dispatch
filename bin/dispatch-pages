@@ -14,9 +14,18 @@
   dispatch-pages remove <slug> [--no-push]
   dispatch-pages rebuild [--no-push]         按 catalog.json 重新生成目录页
 
+仓库结构：文档按项目分目录，文件名就是文档标题，方便在本地直接找：
+  文档/<项目>/<标题>.html    不属于任何项目的放在 文档/其他/
+  index.html · README.md · catalog.json · .github/   自动生成，不要手改
+线上网址一律用英文：<站点>/p/<slug>/。部署由 .github/workflows/pages.yml 完成，
+按 catalog.json 把中文路径的文档复制成 p/<slug>/index.html 再上线；
+仓库的 Settings → Pages → Source 需要选 GitHub Actions。
+slug 是每篇文档不变的英文标识（默认取源文件名），用来判断是新发布还是更新，也是网址的一部分。
+
 配置（~/.claude/dispatch/config）：
   pages_repo=<站点仓库的本地目录>     pages_url=<站点网址>
   pages_title=<目录页标题>             pages_deny=<敏感词，逗号分隔>
+  pages_docs_dir=<文档根目录，默认「文档」>  pages_misc=<无项目时的目录，默认「其他」>
 
 退出码：0 成功；1 用法或配置错误；3 检查未通过，未发布；4 已提交到本地，但推送失败。
 """
@@ -24,12 +33,12 @@ import html
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import date
+from urllib.parse import quote
 
-CONFIG = os.path.expanduser("~/.claude/dispatch/config")
+CONFIG = os.environ.get("DISPATCH_CONFIG") or os.path.expanduser("~/.claude/dispatch/config")
 
 BLOCK = [
     ("本机绝对路径", r"/(?:Users|home)/[A-Za-z0-9._-]+/"),
@@ -142,10 +151,73 @@ BASE_STYLE = (":root{color-scheme:light;padding-top:env(safe-area-inset-top,0px)
               "img{max-width:100%}[hidden]{display:none!important}")
 
 
-def wrap(src, desc):
+INDEX_LINK = re.compile(r'<link rel="index" href="[^"]*">')
+BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def safe_name(s):
+    s = re.sub(r"\s+", " ", BAD_CHARS.sub("-", s)).strip().strip(".")
+    return s[:80] or "未命名"
+
+
+def docs_root():
+    return CFG.get("pages_docs_dir", "文档").strip("/") or "文档"
+
+
+def folder_of(entry):
+    return safe_name(entry["project"]) if entry.get("project") else CFG.get("pages_misc", "其他")
+
+
+def target_path(entry, others):
+    """文档/<项目>/<标题>.html；同目录下已有同名的其他文档时，在文件名后加 slug 区分。"""
+    base = f"{docs_root()}/{folder_of(entry)}/{safe_name(entry['title'])}"
+    rel = base + ".html"
+    if any(p.get("path") == rel for p in others):
+        rel = f"{base}（{entry['slug']}）.html"
+    return rel
+
+
+def index_href(rel):
+    return "../" * rel.count("/") + "index.html"
+
+
+def legacy_path(slug):
+    return f"p/{slug}/index.html"
+
+
+def page_url(slug):
+    """线上网址用英文 slug，和仓库里的中文存放路径无关。"""
+    return f"{site_url()}/p/{slug}/" if site_url() else f"p/{slug}/"
+
+
+def prune_empty(repo, rel_file):
+    d = os.path.dirname(os.path.join(repo, rel_file))
+    while os.path.abspath(d) != os.path.abspath(repo) and os.path.isdir(d) and not os.listdir(d):
+        os.rmdir(d)
+        d = os.path.dirname(d)
+
+
+def place(repo, entry, others):
+    """把文档移到它该在的位置（标题、项目变了，或从旧的 p/<slug>/ 结构迁移），返回新路径。"""
+    rel = target_path(entry, others)
+    cur = entry.get("path") or legacy_path(entry["slug"])
+    src, dst = os.path.join(repo, cur), os.path.join(repo, rel)
+    if cur != rel and os.path.exists(src):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(src, encoding="utf-8") as f:
+            text = f.read()
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(INDEX_LINK.sub(f'<link rel="index" href="{index_href(rel)}">', text, count=1))
+        os.remove(src)
+        prune_empty(repo, cur)
+    entry["path"] = rel
+    return rel
+
+
+def wrap(src, desc, rel):
     """Artifact 页面只有正文片段（外壳由平台补），这里补成完整文档。已经是完整文档的原样返回。"""
     if re.match(r"\s*(<!doctype|<html)", src, re.I):
-        return src
+        return INDEX_LINK.sub(f'<link rel="index" href="{index_href(rel)}">', src, count=1)
     head, rest = [], src
     while True:
         m = HEAD_TAG.match(rest)
@@ -157,7 +229,7 @@ def wrap(src, desc):
     return (
         "<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n"
-        f"{meta}<link rel=\"index\" href=\"../../\">\n" + "\n".join(head) +
+        f"{meta}<link rel=\"index\" href=\"{index_href(rel)}\">\n" + "\n".join(head) +
         f"\n<style>{BASE_STYLE}</style>\n</head>\n<body>\n{rest.strip()}\n</body>\n</html>\n"
     )
 
@@ -246,7 +318,7 @@ def build_index(repo, cat):
         meta += [f'<span class="t">{e(t)}</span>' for t in tags]
         items.append(
             f'<li class="doc" data-text="{e(text)}" data-tags="{e("|".join(tags))}">'
-            f'<a href="p/{e(p["slug"])}/">{e(p["title"])}</a>'
+            f'<a href="p/{e(quote(p["slug"]))}/">{e(p["title"])}</a>'
             + (f"<p>{e(p['description'])}</p>" if p.get("description") else "")
             + f'<div class="meta">{"".join(meta)}</div></li>'
         )
@@ -289,6 +361,123 @@ def build_index(repo, cat):
     nojekyll = os.path.join(repo, ".nojekyll")
     if not os.path.exists(nojekyll):
         open(nojekyll, "w").close()
+    gitignore = os.path.join(repo, ".gitignore")
+    ignored = open(gitignore).read().split() if os.path.exists(gitignore) else []
+    missing = [x for x in (".DS_Store", "_site/") if x not in ignored]
+    if missing:
+        with open(gitignore, "a") as f:
+            f.write("".join(x + "\n" for x in missing))
+    write_deploy_files(repo)
+    build_readme(repo, pages, title)
+
+
+# 部署：仓库里存中文路径，上线时按 catalog.json 复制成英文网址 p/<slug>/。
+BUILD_SCRIPT = '''#!/usr/bin/env python3
+"""由 dispatch-pages 生成，不要手改。
+
+仓库里的文档按中文路径存放（文档/<项目>/<标题>.html），线上网址用英文：
+按 catalog.json 把每篇复制到 <输出目录>/p/<slug>/index.html，再放上目录页 index.html。
+用法：python3 .github/build-site.py <输出目录>
+"""
+import json
+import os
+import re
+import shutil
+import sys
+
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+out = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "_site")
+shutil.rmtree(out, ignore_errors=True)
+os.makedirs(out)
+with open(os.path.join(root, "catalog.json"), encoding="utf-8") as f:
+    pages = json.load(f)["pages"]
+done = 0
+for p in pages:
+    # 旧条目没有 path 时按早期的 p/<slug>/ 结构找；单篇出错只跳过这一篇，不拖垮整站部署。
+    rel = p.get("path") or f"p/{p['slug']}/index.html"
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8") as f:
+            text = f.read()
+    except OSError as err:
+        print(f"跳过 {p['slug']}：读不到 {rel}（{err.strerror}）", file=sys.stderr)
+        continue
+    text = re.sub(r'<link rel="index" href="[^"]*">', '<link rel="index" href="../../index.html">', text, count=1)
+    dst = os.path.join(out, "p", p["slug"])
+    os.makedirs(dst, exist_ok=True)
+    with open(os.path.join(dst, "index.html"), "w", encoding="utf-8") as f:
+        f.write(text)
+    done += 1
+shutil.copy(os.path.join(root, "index.html"), os.path.join(out, "index.html"))
+print(f"已生成 {done}/{len(pages)} 篇 → {out}")
+'''
+
+WORKFLOW = """# 由 dispatch-pages 生成，不要手改。
+# 仓库里的文档用中文路径存放，部署时按 catalog.json 复制成英文网址 p/<slug>/ 再上线。
+# 需要在仓库 Settings → Pages → Source 选 GitHub Actions。
+name: 部署文档站
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 .github/build-site.py _site
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v5
+"""
+
+
+def write_deploy_files(repo):
+    for rel, text in ((".github/build-site.py", BUILD_SCRIPT), (".github/workflows/pages.yml", WORKFLOW)):
+        path = os.path.join(repo, rel)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                if f.read() == text:
+                    continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+
+def build_readme(repo, pages, title):
+    """仓库首页的 README：说明目录结构，按项目列出全部文档。"""
+    root, misc = docs_root(), CFG.get("pages_misc", "其他")
+    url = site_url()
+    lines = [f"# {title}", "",
+             "和 Claude Code 一起写下的方案、手册和调研，定稿后自动发布" + (f"在 {url}/ 。" if url else "。"), "",
+             "## 目录结构", "",
+             f"- `{root}/<项目>/<标题>.html`：每篇文档，按项目分目录，文件名就是标题；不属于任何项目的放在 `{root}/{misc}/`。",
+             "- `index.html`：网站目录页，可以搜索、按标签筛选。",
+             "- `catalog.json`：文档清单数据。",
+             "- `.github/`：部署流程。上线时按 `catalog.json` 把每篇文档复制到英文网址 `p/<slug>/`，线上不出现中文路径。",
+             "", "除文档本身外，这些文件都由 `dispatch-pages` 自动生成，不要手动修改。", "",
+             f"## 文档清单（{len(pages)} 篇）"]
+    groups = {}
+    for p in pages:
+        groups.setdefault(p.get("project") or misc, []).append(p)
+    for name in sorted(groups, key=lambda g: (g == misc, g)):
+        lines += ["", f"### {name}", ""]
+        for p in groups[name]:
+            desc = f" — {p['description']}" if p.get("description") else ""
+            lines.append(f"- [{p['title']}]({quote(p['path'])}) · [线上]({page_url(p['slug'])}) · {p.get('updated', '')}{desc}")
+    with open(os.path.join(repo, "README.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 # ---------- git ----------
@@ -365,23 +554,28 @@ def cmd_publish(args):
         "created": (old or {}).get("created", today),
         "updated": today,
     }
-    cat["pages"] = [p for p in cat["pages"] if p["slug"] != slug] + [entry]
-
-    out_dir = os.path.join(repo, "p", slug)
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
-        f.write(wrap(src, entry["description"]))
+    others = [p for p in cat["pages"] if p["slug"] != slug]
+    rel = target_path(entry, others)
+    old_rel = ((old or {}).get("path") or legacy_path(slug)) if old else None
+    dst = os.path.join(repo, rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(dst, "w", encoding="utf-8") as f:
+        f.write(wrap(src, entry["description"], rel))
+    if old_rel and old_rel != rel and os.path.exists(os.path.join(repo, old_rel)):
+        os.remove(os.path.join(repo, old_rel))
+        prune_empty(repo, old_rel)
+    entry["path"] = rel
+    cat["pages"] = others + [entry]
     save_catalog(repo, cat)
     build_index(repo, cat)
     commit_and_push(repo, f"{'更新' if old else '发布'}：{entry['title']}", push)
-    url = f"{site_url()}/p/{slug}/" if site_url() else f"p/{slug}/"
-    print(f"✔ {'已更新' if old else '已发布'}：{entry['title']}\n  网址：{url}\n  目录：{site_url() or repo}/")
+    print(f"✔ {'已更新' if old else '已发布'}：{entry['title']}\n  文件：{rel}\n  网址：{page_url(slug)}\n  目录：{site_url() or repo}/")
 
 
 def row(p):
     d = p.get("description", "")
     d = d[:60] + "…" if len(d) > 60 else d
-    return f"{p['slug']} │ {p.get('updated', '')} │ {p['title']} │ {d}"
+    return f"{p['slug']} │ {p.get('updated', '')} │ {p.get('path') or p['title']} │ {d}"
 
 
 def cmd_list(args):
@@ -423,7 +617,10 @@ def cmd_remove(args):
     if not old:
         fail(f"没有这篇文档：{slug}")
     cat["pages"] = [p for p in cat["pages"] if p["slug"] != slug]
-    shutil.rmtree(os.path.join(repo, "p", slug), ignore_errors=True)
+    rel = old.get("path") or legacy_path(slug)
+    if os.path.exists(os.path.join(repo, rel)):
+        os.remove(os.path.join(repo, rel))
+        prune_empty(repo, rel)
     save_catalog(repo, cat)
     build_index(repo, cat)
     commit_and_push(repo, f"下线：{old['title']}", push)
@@ -434,10 +631,15 @@ def cmd_rebuild(args):
     push = not take_flag(args, "--no-push")
     repo = repo_dir()
     cat = load_catalog(repo)
+    moved = []
+    for p in cat["pages"]:
+        before = p.get("path") or legacy_path(p["slug"])
+        if place(repo, p, [q for q in cat["pages"] if q is not p]) != before:
+            moved.append(f"  {before} → {p['path']}")
     save_catalog(repo, cat)
     build_index(repo, cat)
-    commit_and_push(repo, "重建目录页", push)
-    print(f"✔ 目录页已重建（{len(cat['pages'])} 篇）")
+    commit_and_push(repo, "整理目录结构" if moved else "重建目录页", push)
+    print(f"✔ 目录页已重建（{len(cat['pages'])} 篇）" + (f"，移动了 {len(moved)} 篇：\n" + "\n".join(moved) if moved else ""))
 
 
 def cmd_hook(_args):
@@ -461,7 +663,8 @@ def cmd_hook(_args):
     if old:
         todo = f"这是已发布文档「{old['title']}」的更新：执行 `{cmd}`（摘要和标签不变就不用再传）。"
     else:
-        todo = f'执行 `{cmd} --desc "<一句话摘要>" --tags <3–5 个标签> [--project <项目>]`。'
+        todo = (f'执行 `{cmd} --desc "<一句话摘要>" --tags <3–5 个标签> --project <项目>`。'
+                "--project 决定放进哪个目录（文档/<项目>/<标题>.html），不属于任何项目才省略。")
     msg = (f"文档站：这个 HTML 页面需要同步发布到公开站点 {site_url() or repo}，用户已授权自动发布，不用再问。{todo}"
            "回复里给出网址。退出码 3 表示敏感检查未通过：停下，把命中项给用户看，由用户决定改内容、--allow 放行还是不发。")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}, ensure_ascii=False))

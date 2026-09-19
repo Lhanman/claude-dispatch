@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "dispatch",
   "displayName": "dispatch 分级调度",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "按任务复杂度把 Claude Code 的工作分成 L0–L4 五级，匹配对应的流程、子 agent 和模型；与技术栈无关，面向省 token 的使用方式。",
   "author": {
     "name": "lhanboyy",
