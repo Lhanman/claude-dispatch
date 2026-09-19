@@ -62,10 +62,10 @@
 ln -s ~/workbench/claude-dispatch ~/.claude/skills/dispatch
 ```
 
-**其他机器**：把仓库推到 git 托管后，通过插件市场安装。
+**其他机器**：通过插件市场安装。完整步骤（个人配置、项目启用、检查、更新）见 [dispatch 接入指南](https://lhanman.github.io/p/dispatch-setup/)。
 
 ```bash
-claude plugin marketplace add <仓库地址或本地路径>
+claude plugin marketplace add git@github.com:Lhanman/claude-dispatch.git   # 或其他仓库地址、本地路径
 claude plugin install dispatch@claude-dispatch
 ```
 
