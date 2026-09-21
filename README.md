@@ -10,8 +10,8 @@
 |---|---|---|
 | L0 直做 | 一句话能说清的改动 | 直接改，跑最小验证 |
 | L1 快修 | 位置明确的 bug 或小功能，不超过 3 个文件 | 三行意图 → 修 bug 先写复现测试 → 改 → 验证 |
-| L2 标准 | 跨模块、需求有歧义、新依赖，或碰到公共接口、数据模型、并发、删除 | scout（按需）→ 最多一轮提问 → Plan 模式 → 测试先行 → reviewer（碰到上述高风险项时） |
-| L3 特性 | 一个会话做不完；改公共接口、持久化格式；新增完整能力 | grill-me → OpenSpec 提案 → 你审阅 → 分任务组执行 → Opus 终审 → 归档 |
+| L2 标准 | 跨模块、需求有歧义、新依赖，或碰到公共接口、数据模型、并发、删除 | scout（按需）→ 最多一轮提问 → Plan 模式 → 测试先行 → 验证 → reviewer 审一次 |
+| L3 特性 | 一个会话做不完；改公共接口、持久化格式；新增完整能力 | grill-me → OpenSpec 提案 → 你审阅 → 分任务组执行，每组审一次 → Opus 终审 → 归档 |
 | L4 史诗 | 新子系统或大改造 | 先定架构决策 → 拆成多个 L3 |
 
 - 级别按**风险最高的那个信号**定，不按平均值。
@@ -32,7 +32,7 @@
 |---|---|---|
 | 主会话 | 由你的设置决定 | 所有任务 |
 | `dispatch:scout` | Haiku 4.5，只读，不加载 CLAUDE.md | 要读 5 个以上文件，或进入不熟悉的区域 |
-| `dispatch:reviewer` | Sonnet 5；L3 终审时指定为 Opus 5 | L2 碰到高风险项时；L3 交付前一次。只看改动差异，只报正确性问题和遗漏的需求 |
+| `dispatch:reviewer` | Sonnet 5；L3 终审时指定为 Opus 5 | L2 验证通过后一次；L3 每个任务组一次、交付前终审一次。只看改动差异，只报正确性问题和遗漏的需求 |
 | `dispatch:builder` | Sonnet 5 | 规格明确的机械性任务组，或 L4 的并行分支 |
 | 验证 | 不用模型 | `dispatch-verify` 脚本 |
 
@@ -172,7 +172,7 @@ router/           ROUTER.md 路由规则；KB.md、PAGES.md 知识库和文档�
 hooks/            hooks.json；session-start.sh 注入规则；prompt-submit.sh 识别 #L0–#L4；Artifact 发布后提示同步到文档站
 bin/              dispatch-verify、dispatch-kb、dispatch-pages，插件启用期间自动加入 PATH
 agents/           scout、reviewer、builder
-skills/           setup、note、brainstorm、grill-me、grilling、test-driven-development、systematic-debugging
+skills/           setup、note、brainstorm、grill-me、grilling、code-review、test-driven-development、systematic-debugging
 ```
 
 ## 依赖

@@ -6,5 +6,6 @@
 |---|---|---|---|
 | `skills/grilling/`、`skills/grill-me/` | [mattpocock/skills](https://github.com/mattpocock/skills) | Copyright (c) 2026 Matt Pocock | `grill-me` 改为调用本插件内的 `dispatch:grilling` |
 | `skills/test-driven-development/`、`skills/systematic-debugging/` | [obra/superpowers](https://github.com/obra/superpowers) | Copyright (c) 2025 Jesse Vincent | 收窄了触发描述，使其按 dispatch 的级别触发；把对 `superpowers:*` 的引用改为本插件内的对应项 |
+| `skills/code-review/` | [obra/superpowers](https://github.com/obra/superpowers) 的 `requesting-code-review`、`receiving-code-review` | Copyright (c) 2025 Jesse Vincent | 两个 skill 合并为一个并改写为中文；审查员改为本插件的 `dispatch:reviewer`，回传格式由该 agent 自带，不再内置 prompt 模板；触发条件改为按 dispatch 的 L2–L4 级别；另加了「先验证再派审查」一节 |
 
 MIT 许可全文见本仓库的 `LICENSE`，上述项目各自的许可条款与之相同，版权归各自作者所有。

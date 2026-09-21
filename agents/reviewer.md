@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: 全新上下文的只读审查。L2 任务碰到公共接口、数据模型、并发或删除操作时使用；L3 交付前终审一次（调用时指定 model 为 opus）。只看改动差异，只报正确性问题和遗漏的需求。
+description: 全新上下文的只读审查。L2 实现完成、验证通过后审一次；L3 每个任务组做完审一次，交付前终审（调用时指定 model 为 opus）。只看改动差异，只报正确性问题和遗漏的需求。
 tools: Read, Grep, Glob, Bash
 model: sonnet
 effort: high

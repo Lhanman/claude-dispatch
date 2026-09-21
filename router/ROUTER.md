@@ -14,8 +14,8 @@ L1 起，回复第一行写判定：`〔L2 · 依据〕`。L0–L2 判定后直�
 ## 流程
 - **L0**：直接改，跑最小验证。
 - **L1**：先写三行意图（目标 / 不做什么 / 验收标准）。修 bug 先写能复现的测试；原因不明时用 `dispatch:systematic-debugging`。
-- **L2**：范围不清先派 scout → 有未决问题则 `dispatch:grilling` 最多一轮 → Plan 模式出方案 → 按 `dispatch:test-driven-development` 实现 → 命中 L2 的风险信号时派 reviewer。
-- **L3**：`/dispatch:grill-me` → `/opsx:propose` → 用户审规格 → `/clear` → `/opsx:apply` 按任务组执行，组与组之间 `/clear` → reviewer 终审一次（调用时指定 `model: opus`）→ `/opsx:verify` → `/opsx:archive`。项目没有 `openspec/` 时，建议运行 `/dispatch:setup`，或把方案写到 `docs/plans/`。
+- **L2**：范围不清先派 scout → 有未决问题则 `dispatch:grilling` 最多一轮 → Plan 模式出方案 → 按 `dispatch:test-driven-development` 实现 → 验证通过后按 `dispatch:code-review` 派 reviewer 审一次。
+- **L3**：`/dispatch:grill-me` → `/opsx:propose` → 用户审规格 → `/clear` → `/opsx:apply` 按任务组执行，每组做完按 `dispatch:code-review` 审一次，组与组之间 `/clear` → reviewer 终审一次（调用时指定 `model: opus`）→ `/opsx:verify` → `/opsx:archive`。项目没有 `openspec/` 时，建议运行 `/dispatch:setup`，或把方案写到 `docs/plans/`。
 - **L4**：`/opsx:explore` 定决策 → 拆成多个 L3 逐个走。真正独立的部分才并行，最多 3 路，需要 git worktree。
 
 ## 升降级
@@ -27,7 +27,7 @@ L1 起，回复第一行写判定：`〔L2 · 依据〕`。L0–L2 判定后直�
 ## 子 agent
 只在能节省主会话上下文、或需要独立判断时才派；派出时写清目标、输出格式、边界。
 - `dispatch:scout`：要读 5 个以上文件或进入不熟悉的区域时用，优先于内置 Explore；小范围查找直接 Grep。
-- `dispatch:reviewer`：委托里给出需求和改动范围。
+- `dispatch:reviewer`：按 `dispatch:code-review` 写委托，只给需求、改动范围和验证结果，不给会话历史。
 - `dispatch:builder`：只接规格明确的机械性任务组，或 L4 的并行分支；需要判断的实现留在主会话。
 
 ## 验证
