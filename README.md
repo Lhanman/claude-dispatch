@@ -121,7 +121,7 @@ dispatch-kb outline 订单系统/订单导出改为分批流式写出.md  # 摘�
 
 ## 文档站（可选）
 
-把生成的 HTML 文档（包括 Artifact 页面）发布到一个静态站点，例如 GitHub Pages，积累成一套可以浏览、搜索的文档库。站点目录页按 `catalog.json` 自动生成，支持搜索和按标签筛选。
+把生成的 HTML 文档（包括 Artifact 页面）发布到一个静态站点，例如 GitHub Pages，积累成一套可以浏览、搜索的文档库。站点首页按 `catalog.json` 和 `kb.json` 自动生成，支持搜索、按类别和标签筛选。
 
 **配置**：写在 `~/.claude/dispatch/config`。
 
@@ -154,6 +154,37 @@ dispatch-pages publish page.html --slug my-page --desc "一句话摘要" --tags 
 
 > GitHub Pages 站点是公开的，即使仓库是私有的也一样。发布之前，靠敏感检查把关。
 
+## 知识库中心（可选）
+
+配置了知识库和文档站之后，还可以把知识库里**指定目录**的笔记同步到同一个站点，和 HTML 文档共用一个首页，并生成一张知识图谱。默认什么都不同步，必须显式列出允许公开的顶层目录：
+
+```ini
+kb_public=个人项目,技术笔记   # 只有这些顶层目录里的笔记会上站；没有这一行就不同步
+```
+
+```bash
+dispatch-pages kb-sync --dry-run   # 先看会同步哪些、哪些被拦下
+dispatch-pages kb-sync             # 全量同步：写入、更新、下线，然后提交推送
+```
+
+公开范围是多重把关的，顺序是：
+
+1. **目录白名单**。白名单外的目录根本不会被读取，也没有任何放行开关——公司内容因此在结构上就不可能上站。
+2. **单篇退出**。笔记 frontmatter 写 `publish: false` 就不同步（已经上线的会在下次同步时下线）。
+3. **敏感检查**。笔记原文和渲染出来的 HTML 各查一遍本机路径、邮箱、疑似密钥和 `pages_deny` 里的词，命中就整篇跳过，报告里列出篇名和命中的词。`kb-sync` 不支持 `--allow`，也不会为了上传而替换敏感词。
+4. **链接不泄露**。指向未公开笔记的 `[[链接]]` 整体换成「（未公开）」，连别名都不保留；未公开笔记的标题、标签不会出现在首页、搜索和图谱里。
+5. **本地图片不上传**。图片内容无法检查，页面上显示「（图片未公开）」，同步报告里列出是哪几篇。
+
+每次同步都是全量的：笔记改名、删除、改成不公开，下一次同步会自动下线。笔记的网址是 `<站点>/kb/<slug>/`：slug 取 frontmatter 里的 `slug`，没有就沿用上次的（改名也不换网址），再没有就按标题的英文部分或内容哈希生成。
+
+缺 frontmatter 的老笔记不会被改写：标题取一级标题或文件名，摘要取第一段，项目取二级目录名。
+
+**知识图谱**在 `<站点>/graph/`：笔记之间的 `[[链接]]` 连实线，共同标签和所属项目通过标签节点、项目节点连虚线。没有 JavaScript 时，页面会退回到按项目和标签分组的列表。
+
+`/dispatch:note` 写完一篇笔记后，如果它在白名单目录里，会自动执行一次同步。
+
+> **下线只是从当前版本移除。**站点仓库是公开的 git 仓库，曾经公开过的内容在历史提交里仍然翻得到；真要彻底抹掉得重写历史再强推。所以把一个目录加进 `kb_public` 之前，先确认里面的每一篇都可以公开。
+
 ## 常驻开销
 
 每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token；合计约 2.3k），加上各 skill 和 agent 的一行描述。查看实测值：
@@ -171,6 +202,7 @@ skill 的正文只在被调用时才加载。没有 `#L` 标记时，hook 不输
 router/           ROUTER.md 路由规则；KB.md、PAGES.md 知识库和文档站规则（配置了才注入）
 hooks/            hooks.json；session-start.sh 注入规则；prompt-submit.sh 识别 #L0–#L4；Artifact 发布后提示同步到文档站
 bin/              dispatch-verify、dispatch-kb、dispatch-pages，插件启用期间自动加入 PATH
+lib/              markdown_lite.py（笔记渲染）、kbsite.py（知识库同步、笔记页、知识图谱）
 agents/           scout、reviewer、builder
 skills/           setup、note、brainstorm、grill-me、grilling、code-review、test-driven-development、systematic-debugging
 ```

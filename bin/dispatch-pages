@@ -13,19 +13,29 @@
   dispatch-pages search <词>... [-n 条数]
   dispatch-pages remove <slug> [--no-push]
   dispatch-pages rebuild [--no-push]         按 catalog.json 重新生成目录页
+  dispatch-pages kb-sync [--dry-run] [--no-push]
+                            把知识库里白名单内的笔记全量同步到站点（见下）
 
 仓库结构：文档按项目分目录，文件名就是文档标题，方便在本地直接找：
   文档/<项目>/<标题>.html    不属于任何项目的放在 文档/其他/
-  index.html · README.md · catalog.json · .github/   自动生成，不要手改
-线上网址一律用英文：<站点>/p/<slug>/。部署由 .github/workflows/pages.yml 完成，
-按 catalog.json 把中文路径的文档复制成 p/<slug>/index.html 再上线；
-仓库的 Settings → Pages → Source 需要选 GitHub Actions。
+  知识库/<目录>/<笔记>.html  从知识库同步来的笔记，目录结构和知识库一致
+  index.html · README.md · catalog.json · kb.json · 知识图谱.html · .github/  自动生成，不要手改
+线上网址一律用英文：文档 <站点>/p/<slug>/，笔记 <站点>/kb/<slug>/，图谱 <站点>/graph/。
+部署由 .github/workflows/pages.yml 完成，按 catalog.json 和 kb.json 把中文路径的页面复制成
+英文网址再上线；仓库的 Settings → Pages → Source 需要选 GitHub Actions。
 slug 是每篇文档不变的英文标识（默认取源文件名），用来判断是新发布还是更新，也是网址的一部分。
+
+知识库同步（kb-sync）：只同步 kb_public 列出的顶层目录，没配置就什么都不同步；单篇可以用
+frontmatter `publish: false` 退出；笔记原文和渲染结果各过一遍敏感检查，命中就整篇跳过，
+不支持 --allow；指向未公开笔记的 [[链接]] 会整体换成「（未公开）」；本地图片不上传。
+每次都是全量同步：笔记改名、删除、改成不公开，下一次同步会自动下线。
 
 配置（~/.claude/dispatch/config）：
   pages_repo=<站点仓库的本地目录>     pages_url=<站点网址>
   pages_title=<目录页标题>             pages_deny=<敏感词，逗号分隔>
   pages_docs_dir=<文档根目录，默认「文档」>  pages_misc=<无项目时的目录，默认「其他」>
+  kb_dir=<知识库目录>                  kb_public=<允许公开的顶层目录，逗号分隔>
+  kb_exclude=<不参与的顶层目录，逗号分隔>
 
 退出码：0 成功；1 用法或配置错误；3 检查未通过，未发布；4 已提交到本地，但推送失败。
 """
@@ -38,6 +48,9 @@ import sys
 from datetime import date
 from urllib.parse import quote
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
+import kbsite  # noqa: E402
+
 CONFIG = os.environ.get("DISPATCH_CONFIG") or os.path.expanduser("~/.claude/dispatch/config")
 
 BLOCK = [
@@ -47,7 +60,13 @@ BLOCK = [
                 r"|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     ("Artifact 专属能力（站点上无法运行）", r"claude\.use\("),
 ]
-WARN = [("私有 Artifact 链接（访客打不开）", r"claude\.ai/(?:code/)?artifact/[A-Za-z0-9-]+")]
+WARN = [
+    ("私有 Artifact 链接（访客打不开）", r"claude\.ai/(?:code/)?artifact/[A-Za-z0-9-]+"),
+    # 只提醒不拦截：个人项目文档里多半是 your-password 这类占位或本地默认值，真假由人判断
+    # DB_PASSWORD=、JWT_SECRET= 这类带前缀的写法也要认出来，所以不能用 \b 卡开头
+    ("疑似口令赋值", r"(?i)[a-z_]{0,20}(?:password|passwd|secret|api[_-]?key|access[_-]?token)"
+                r"[\"']?\s*[:=]\s*[\"']?[^\s\"'<>,;]{4,}"),
+]
 EMAIL_OK = re.compile(r"^(git|noreply|no-reply)@|@(example\.(com|org)|users\.noreply\.github\.com)$", re.I)
 
 
@@ -261,95 +280,160 @@ def save_catalog(repo, cat):
         f.write("\n")
 
 
-INDEX_CSS = """
-:root{--ground:#F3F4F6;--paper:#FFFFFF;--ink:#161A21;--muted:#5B6372;--rule:#DADDE3;--chip:#E4E8F2;--chip-ink:#2E4893;--accent:#4865AA;
---serif:"Noto Serif SC","Songti SC",serif;--sans:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;--mono:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace}
-@media (prefers-color-scheme:dark){:root{--ground:#12151B;--paper:#1A1E26;--ink:#E5E8EE;--muted:#9AA2B1;--rule:#2C323D;--chip:#222B3D;--chip-ink:#AFC1EA;--accent:#95ABDB}}
-*{box-sizing:border-box}
-html{color-scheme:light dark}
-body{margin:0;background:var(--ground);color:var(--ink);font:15.5px/1.75 var(--sans);padding-inline:20px;padding-block:0 80px}
-main{max-width:760px;margin:0 auto}
-header{padding-block:56px 28px;border-bottom:1px solid var(--rule)}
-.eyebrow{font:600 11.5px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+INDEX_CSS = kbsite.TOKENS + """
+main{max-width:820px;margin:0 auto}
+header.site{padding-block:56px 24px;border-bottom:1px solid var(--rule)}
 h1{font:900 clamp(30px,5vw,42px)/1.2 var(--serif);margin:12px 0 10px;text-wrap:balance}
-.lede{color:var(--muted);margin:0}
+.lede{color:var(--muted);margin:0 0 6px}
 .ramp{display:flex;gap:3px;margin-top:20px;height:6px;max-width:260px}
 .ramp i{flex:1;border-radius:1px}
 .controls{display:grid;gap:12px;padding-block:22px 6px}
 #q{width:100%;font:15px var(--sans);padding:10px 12px;border:1px solid var(--rule);border-radius:6px;background:var(--paper);color:var(--ink)}
-#q:focus-visible,.tag:focus-visible,.doc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.tags{display:flex;flex-wrap:wrap;gap:6px}
-.tag{font:500 12px/1 var(--mono);padding:6px 9px;border-radius:999px;border:1px solid var(--rule);background:var(--paper);color:var(--muted);cursor:pointer}
-.tag[aria-pressed="true"]{background:var(--chip-ink);border-color:var(--chip-ink);color:var(--paper)}
-ol.docs{list-style:none;margin:10px 0 0;padding:0}
-.doc{border-top:1px solid var(--rule);padding:18px 0}
-.doc a{font:700 18px/1.45 var(--serif);color:var(--ink);text-decoration:none}
-.doc a:hover{color:var(--accent)}
-.doc p{margin:4px 0 8px;color:var(--muted);font-size:14.5px}
+#q:focus-visible,button:focus-visible,.item a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.row .sep{flex:1}
+button.pill{font:500 12px/1 var(--mono);padding:6px 9px;border-radius:999px;border:1px solid var(--rule);background:var(--paper);color:var(--muted);cursor:pointer}
+button.pill[aria-pressed="true"]{background:var(--chip-ink);border-color:var(--chip-ink);color:var(--paper)}
+button.view{border-radius:6px}
+.hint{font:500 12px/1.4 var(--mono);color:var(--muted)}
+ol.items{list-style:none;margin:10px 0 0;padding:0}
+.item{border-top:1px solid var(--rule);padding:18px 0}
+.item a.t{font:700 18px/1.45 var(--serif);color:var(--ink);text-decoration:none}
+.item a.t:hover{color:var(--accent)}
+.item p{margin:4px 0 8px;color:var(--muted);font-size:14.5px}
 .meta{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;font:500 12px/1.4 var(--mono);color:var(--muted)}
-.meta span.t{background:var(--chip);color:var(--chip-ink);padding:2px 7px;border-radius:3px}
+.meta .chip{padding:2px 7px}
+.meta .kind{border:1px solid var(--rule);padding:2px 7px;border-radius:999px}
+.group{margin-top:26px}
+.group h2{font:700 15px/1.5 var(--sans);margin:0;color:var(--muted)}
 .empty{color:var(--muted);padding:24px 0}
-footer{margin-top:28px;font-size:12.5px;color:var(--muted)}
+.graph-card{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin-top:26px;padding:16px 18px;background:var(--paper);border:1px solid var(--rule);border-radius:10px}
+.graph-card a{font:700 16px/1.5 var(--serif);text-decoration:none}
+.graph-card span{color:var(--muted);font-size:14px}
+footer{margin-top:32px;font-size:12.5px;color:var(--muted)}
 """
 
 INDEX_JS = """
-const q=document.getElementById('q'),docs=[...document.querySelectorAll('.doc')],tags=[...document.querySelectorAll('.tag')],empty=document.getElementById('empty');
-let on=new Set();
+const q=document.getElementById('q'),items=[...document.querySelectorAll('.item')],empty=document.getElementById('empty'),count=document.getElementById('count');
+let kind='',tags=new Set();
 function apply(){const s=q.value.trim().toLowerCase();let n=0;
-for(const d of docs){const ok=(!s||d.dataset.text.includes(s))&&[...on].every(t=>d.dataset.tags.split('|').includes(t));d.hidden=!ok;if(ok)n++}
-empty.hidden=n>0}
+for(const el of items){const ok=(!s||el.dataset.text.includes(s))&&(!kind||el.dataset.kind===kind)&&[...tags].every(t=>el.dataset.tags.split('|').includes(t));
+el.hidden=!ok;if(ok&&el.dataset.view==='time')n++}
+for(const g of document.querySelectorAll('.group'))g.hidden=![...g.querySelectorAll('.item')].some(x=>!x.hidden);
+count.textContent=n;empty.hidden=n>0}
 q.addEventListener('input',apply);
-for(const b of tags)b.addEventListener('click',()=>{const t=b.dataset.tag;on.has(t)?on.delete(t):on.add(t);b.setAttribute('aria-pressed',on.has(t));apply()});
+for(const b of document.querySelectorAll('button.kind'))b.addEventListener('click',()=>{
+const v=b.dataset.kind;kind=kind===v?'':v;
+for(const o of document.querySelectorAll('button.kind'))o.setAttribute('aria-pressed',o.dataset.kind===kind);apply()});
+for(const b of document.querySelectorAll('button.tag'))b.addEventListener('click',()=>{
+const t=b.dataset.tag;tags.has(t)?tags.delete(t):tags.add(t);b.setAttribute('aria-pressed',tags.has(t));apply()});
+for(const b of document.querySelectorAll('button.view'))b.addEventListener('click',()=>{
+const v=b.dataset.view;
+for(const o of document.querySelectorAll('button.view'))o.setAttribute('aria-pressed',o.dataset.view===v);
+document.getElementById('by-time').hidden=v!=='time';document.getElementById('by-project').hidden=v!=='project';apply()});
 """
+
+
+def hub_items(repo, cat):
+    """首页的条目：HTML 文档和知识库笔记合在一起，按更新时间倒序。"""
+    items = []
+    for p in cat["pages"]:
+        items.append({
+            "kind": "文档", "url": f'p/{quote(p["slug"])}/', "title": p["title"],
+            "desc": p.get("description", ""), "type": "", "project": p.get("project", ""),
+            "tags": p.get("tags", []), "updated": p.get("updated", ""),
+            "text": " ".join([p["title"], p.get("description", ""), p.get("project", ""),
+                              " ".join(p.get("tags", [])), p["slug"]]),
+        })
+    for n in kbsite.load_kb(repo):
+        items.append({
+            "kind": "笔记", "url": f'kb/{quote(n["slug"])}/', "title": n["title"],
+            "desc": n.get("summary", ""), "type": n.get("type", ""), "project": n.get("project", ""),
+            "tags": n.get("tags", []), "updated": n.get("updated", ""),
+            "text": " ".join([n["title"], n.get("summary", ""), n.get("project", ""), n.get("type", ""),
+                              " ".join(n.get("tags", [])), n.get("text", "")]),
+        })
+    items.sort(key=lambda x: (x["updated"], x["title"]), reverse=True)
+    return items
+
+
+def item_html(it, view):
+    e = html.escape
+    meta = [f'<span class="kind">{e(it["kind"])}</span>']
+    if it.get("type"):
+        meta.append(f'<span class="chip">{e(it["type"])}</span>')
+    if it.get("project"):
+        meta.append(f'<span>{e(it["project"])}</span>')
+    meta.append(f'<span>{e(it["updated"])}</span>')
+    meta += [f'<span class="chip">{e(t)}</span>' for t in it["tags"]]
+    return (
+        f'<li class="item" data-view="{view}" data-kind="{e(it["kind"])}" '
+        f'data-tags="{e("|".join(it["tags"]))}" data-text="{e(it["text"].lower())}">'
+        f'<a class="t" href="{it["url"]}">{e(it["title"])}</a>'
+        + (f'<p>{e(it["desc"])}</p>' if it.get("desc") else "")
+        + f'<div class="meta">{"".join(meta)}</div></li>'
+    )
 
 
 def build_index(repo, cat):
     title = CFG.get("pages_title", "文档")
     pages = cat["pages"]
-    all_tags = sorted({t for p in pages for t in p.get("tags", [])}, key=lambda t: (-sum(t in p.get("tags", []) for p in pages), t))
+    notes = kbsite.load_kb(repo)
+    items = hub_items(repo, cat)
     e = html.escape
-    items = []
-    for p in pages:
-        tags = p.get("tags", [])
-        text = " ".join([p["title"], p.get("description", ""), p.get("project", ""), " ".join(tags), p["slug"]]).lower()
-        meta = [f"<span>{e(p.get('updated', ''))}</span>"]
-        if p.get("project"):
-            meta.append(f"<span>{e(p['project'])}</span>")
-        meta += [f'<span class="t">{e(t)}</span>' for t in tags]
-        items.append(
-            f'<li class="doc" data-text="{e(text)}" data-tags="{e("|".join(tags))}">'
-            f'<a href="p/{e(quote(p["slug"]))}/">{e(p["title"])}</a>'
-            + (f"<p>{e(p['description'])}</p>" if p.get("description") else "")
-            + f'<div class="meta">{"".join(meta)}</div></li>'
-        )
-    tag_buttons = "".join(f'<button class="tag" type="button" data-tag="{e(t)}" aria-pressed="false">{e(t)}</button>' for t in all_tags)
-    latest = pages[0].get("updated", "") if pages else ""
+    all_tags = sorted({t for it in items for t in it["tags"]},
+                      key=lambda t: (-sum(t in it["tags"] for it in items), t))[:24]
+    by_time = "".join(item_html(it, "time") for it in items)
+    groups = {}
+    for it in items:
+        groups.setdefault(it["project"] or CFG.get("pages_misc", "其他"), []).append(it)
+    by_project = "".join(
+        f'<section class="group"><h2>{e(name)}</h2><ol class="items">'
+        + "".join(item_html(it, "project") for it in groups[name]) + "</ol></section>"
+        for name in sorted(groups, key=lambda g: (-len(groups[g]), g))
+    )
+    tag_buttons = "".join(
+        f'<button class="pill tag" type="button" data-tag="{e(t)}" aria-pressed="false">{e(t)}</button>'
+        for t in all_tags)
+    latest = items[0]["updated"] if items else ""
+    counts = f"{len(notes)} 篇笔记 · {len(pages)} 篇文档" if notes else f"{len(pages)} 篇文档"
+    graph_card = (
+        '<div class="graph-card"><a href="graph/">知识图谱 →</a>'
+        f'<span>{len(notes)} 篇笔记之间的链接和共同标签</span></div>' if notes else "")
     doc = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{e(title)}</title>
-<meta name="description" content="{e(title)}：{len(pages)} 篇 HTML 文档">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@700;900&family=Noto+Sans+SC:wght@400;500&family=JetBrains+Mono:wght@500;600&display=swap">
+<meta name="description" content="{e(title)}：{e(counts)}">
+{kbsite.FONTS}
 <style>{INDEX_CSS}</style>
 </head>
 <body>
 <main>
-<header>
-<span class="eyebrow">文档站 · {len(pages)} 篇</span>
+<header class="site">
+<span class="eyebrow">知识库中心 · {e(counts)}</span>
 <h1>{e(title)}</h1>
-<p class="lede">和 Claude Code 一起写下的方案、手册和调研，定稿后发布在这里。</p>
+<p class="lede">和 Claude Code 一起写下的方案、手册和调研，以及从个人知识库同步来的笔记。</p>
 <div class="ramp" aria-hidden="true"><i style="background:#8E97AA"></i><i style="background:#6680B3"></i><i style="background:#4865AA"></i><i style="background:#2E4893"></i><i style="background:#1B2D6A"></i></div>
 </header>
 <div class="controls">
-<input id="q" type="search" placeholder="搜索标题、摘要、标签" aria-label="搜索文档">
-<div class="tags">{tag_buttons}</div>
+<input id="q" type="search" placeholder="搜索标题、摘要、标签和正文" aria-label="搜索">
+<div class="row">
+<button class="pill kind" type="button" data-kind="笔记" aria-pressed="false">笔记</button>
+<button class="pill kind" type="button" data-kind="文档" aria-pressed="false">文档</button>
+<span class="sep"></span>
+<button class="pill view" type="button" data-view="time" aria-pressed="true">按时间</button>
+<button class="pill view" type="button" data-view="project" aria-pressed="false">按项目</button>
 </div>
-<ol class="docs">{"".join(items)}</ol>
-<p class="empty" id="empty" hidden>没有匹配的文档。</p>
+<div class="row">{tag_buttons}</div>
+<p class="hint"><span id="count">{len(items)}</span> 条</p>
+</div>
+<ol class="items" id="by-time">{by_time}</ol>
+<div id="by-project" hidden>{by_project}</div>
+<p class="empty" id="empty" hidden>没有匹配的内容。</p>
+{graph_card}
 <footer>最近更新 {e(latest)}</footer>
 </main>
 <script>{INDEX_JS}</script>
@@ -368,15 +452,16 @@ def build_index(repo, cat):
         with open(gitignore, "a") as f:
             f.write("".join(x + "\n" for x in missing))
     write_deploy_files(repo)
-    build_readme(repo, pages, title)
+    build_readme(repo, pages, notes, title)
 
 
 # 部署：仓库里存中文路径，上线时按 catalog.json 复制成英文网址 p/<slug>/。
 BUILD_SCRIPT = '''#!/usr/bin/env python3
 """由 dispatch-pages 生成，不要手改。
 
-仓库里的文档按中文路径存放（文档/<项目>/<标题>.html），线上网址用英文：
-按 catalog.json 把每篇复制到 <输出目录>/p/<slug>/index.html，再放上目录页 index.html。
+仓库里的页面按中文路径存放（文档/<项目>/<标题>.html、知识库/<目录>/<笔记>.html），
+线上网址用英文：按 catalog.json 和 kb.json 复制成 p/<slug>/、kb/<slug>/，
+再放上目录页 index.html 和图谱页 graph/index.html。
 用法：python3 .github/build-site.py <输出目录>
 """
 import json
@@ -389,26 +474,40 @@ root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 out = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "_site")
 shutil.rmtree(out, ignore_errors=True)
 os.makedirs(out)
-with open(os.path.join(root, "catalog.json"), encoding="utf-8") as f:
-    pages = json.load(f)["pages"]
-done = 0
-for p in pages:
-    # 旧条目没有 path 时按早期的 p/<slug>/ 结构找；单篇出错只跳过这一篇，不拖垮整站部署。
-    rel = p.get("path") or f"p/{p['slug']}/index.html"
+
+
+def load(name, key):
+    try:
+        with open(os.path.join(root, name), encoding="utf-8") as f:
+            return json.load(f)[key]
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def copy(rel, parts, index_href):
+    """把一个中文路径的页面复制到英文网址下；单篇出错只跳过这一篇，不拖垮整站部署。"""
     try:
         with open(os.path.join(root, rel), encoding="utf-8") as f:
             text = f.read()
     except OSError as err:
-        print(f"跳过 {p['slug']}：读不到 {rel}（{err.strerror}）", file=sys.stderr)
-        continue
-    text = re.sub(r'<link rel="index" href="[^"]*">', '<link rel="index" href="../../index.html">', text, count=1)
-    dst = os.path.join(out, "p", p["slug"])
+        print(f"跳过 {'/'.join(parts)}：读不到 {rel}（{err.strerror}）", file=sys.stderr)
+        return 0
+    text = re.sub(r'<link rel="index" href="[^"]*">', f'<link rel="index" href="{index_href}">', text, count=1)
+    dst = os.path.join(out, *parts)
     os.makedirs(dst, exist_ok=True)
     with open(os.path.join(dst, "index.html"), "w", encoding="utf-8") as f:
         f.write(text)
-    done += 1
+    return 1
+
+
+pages = load("catalog.json", "pages")
+notes = load("kb.json", "notes")
+done = sum(copy(p.get("path") or f"p/{p['slug']}/index.html", ("p", p["slug"]), "../../index.html") for p in pages)
+done += sum(copy(n["path"], ("kb", n["slug"]), "../../index.html") for n in notes)
+if notes and os.path.exists(os.path.join(root, "知识图谱.html")):
+    done += copy("知识图谱.html", ("graph",), "../index.html")
 shutil.copy(os.path.join(root, "index.html"), os.path.join(out, "index.html"))
-print(f"已生成 {done}/{len(pages)} 篇 → {out}")
+print(f"已生成 {done} 个页面（文档 {len(pages)} · 笔记 {len(notes)}）→ {out}")
 '''
 
 WORKFLOW = """# 由 dispatch-pages 生成，不要手改。
@@ -455,18 +554,22 @@ def write_deploy_files(repo):
             f.write(text)
 
 
-def build_readme(repo, pages, title):
-    """仓库首页的 README：说明目录结构，按项目列出全部文档。"""
+def build_readme(repo, pages, notes, title):
+    """仓库首页的 README：说明目录结构，按项目列出全部文档，再列出同步来的笔记。"""
     root, misc = docs_root(), CFG.get("pages_misc", "其他")
     url = site_url()
     lines = [f"# {title}", "",
-             "和 Claude Code 一起写下的方案、手册和调研，定稿后自动发布" + (f"在 {url}/ 。" if url else "。"), "",
+             "和 Claude Code 一起写下的方案、手册和调研，以及从个人知识库同步来的笔记，自动发布"
+             + (f"在 {url}/ 。" if url else "。"), "",
              "## 目录结构", "",
              f"- `{root}/<项目>/<标题>.html`：每篇文档，按项目分目录，文件名就是标题；不属于任何项目的放在 `{root}/{misc}/`。",
-             "- `index.html`：网站目录页，可以搜索、按标签筛选。",
-             "- `catalog.json`：文档清单数据。",
-             "- `.github/`：部署流程。上线时按 `catalog.json` 把每篇文档复制到英文网址 `p/<slug>/`，线上不出现中文路径。",
-             "", "除文档本身外，这些文件都由 `dispatch-pages` 自动生成，不要手动修改。", "",
+             f"- `{kbsite.KB_DIR_NAME}/<目录>/<笔记>.html`：从知识库同步来的笔记，目录结构和知识库一致。",
+             "- `index.html`：网站首页，可以搜索、按标签和类别筛选。",
+             f"- `{kbsite.GRAPH_FILE}`：知识图谱页，线上在 `graph/`。",
+             "- `catalog.json`、`kb.json`：文档和笔记的清单数据。",
+             "- `.github/`：部署流程。上线时按清单把页面复制到英文网址 `p/<slug>/`、`kb/<slug>/`，线上不出现中文路径。",
+             "", "这些文件全部由 `dispatch-pages` 自动生成，不要手动修改；笔记的正文请在知识库里改，"
+             "下一次同步会覆盖这里的副本。", "",
              f"## 文档清单（{len(pages)} 篇）"]
     groups = {}
     for p in pages:
@@ -476,6 +579,17 @@ def build_readme(repo, pages, title):
         for p in groups[name]:
             desc = f" — {p['description']}" if p.get("description") else ""
             lines.append(f"- [{p['title']}]({quote(p['path'])}) · [线上]({page_url(p['slug'])}) · {p.get('updated', '')}{desc}")
+    if notes:
+        lines += ["", f"## 知识库笔记（{len(notes)} 篇）"]
+        note_groups = {}
+        for n in notes:
+            note_groups.setdefault(n.get("project") or misc, []).append(n)
+        for name in sorted(note_groups, key=lambda g: (g == misc, g)):
+            lines += ["", f"### {name}", ""]
+            for n in note_groups[name]:
+                desc = f" — {n['summary']}" if n.get("summary") else ""
+                online = f"{site_url()}/kb/{n['slug']}/" if site_url() else f"kb/{n['slug']}/"
+                lines.append(f"- [{n['title']}]({quote(n['path'])}) · [线上]({online}) · {n.get('updated', '')}{desc}")
     with open(os.path.join(repo, "README.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -486,9 +600,29 @@ def git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
 
 
+def unpushed(repo):
+    """本地有提交还没推上去（上次推送失败时会这样）。没有上游分支时按「有」处理，交给 push 去判断。"""
+    r = git(repo, "rev-list", "--count", "@{u}..HEAD")
+    if r.returncode != 0:
+        return bool(git(repo, "log", "-1", "--oneline").stdout.strip())
+    return r.stdout.strip() not in ("", "0")
+
+
+def push_head(repo):
+    if not git(repo, "remote").stdout.strip():
+        fail("已提交到本地，但仓库没有配置远程地址，未推送。", 4)
+    r = git(repo, "push", "-u", "origin", "HEAD")
+    if r.returncode != 0:
+        fail("已提交到本地，推送失败：" + (r.stderr or r.stdout).strip()[-400:], 4)
+
+
 def commit_and_push(repo, message, push):
     git(repo, "add", "-A")
     if git(repo, "diff", "--cached", "--quiet").returncode == 0:
+        if push and unpushed(repo):
+            print("没有新变化，但有未推送的提交，补推一次。")
+            push_head(repo)
+            return
         print("没有变化，无需提交。")
         return
     r = git(repo, "commit", "-m", message)
@@ -497,11 +631,7 @@ def commit_and_push(repo, message, push):
     if not push:
         print("已提交到本地（--no-push，未推送）。")
         return
-    if not git(repo, "remote").stdout.strip():
-        fail("已提交到本地，但仓库没有配置远程地址，未推送。", 4)
-    r = git(repo, "push", "-u", "origin", "HEAD")
-    if r.returncode != 0:
-        fail("已提交到本地，推送失败：" + (r.stderr or r.stdout).strip()[-400:], 4)
+    push_head(repo)
 
 
 # ---------- 子命令 ----------
@@ -637,9 +767,76 @@ def cmd_rebuild(args):
         if place(repo, p, [q for q in cat["pages"] if q is not p]) != before:
             moved.append(f"  {before} → {p['path']}")
     save_catalog(repo, cat)
+    notes = kbsite.rebuild_graph(repo, CFG.get("pages_title", "文档"))
     build_index(repo, cat)
     commit_and_push(repo, "整理目录结构" if moved else "重建目录页", push)
-    print(f"✔ 目录页已重建（{len(cat['pages'])} 篇）" + (f"，移动了 {len(moved)} 篇：\n" + "\n".join(moved) if moved else ""))
+    print(f"✔ 首页已重建（文档 {len(cat['pages'])} 篇 · 笔记 {notes} 篇）"
+          + (f"，移动了 {len(moved)} 篇：\n" + "\n".join(moved) if moved else ""))
+
+
+def kb_dir():
+    d = CFG.get("kb_dir")
+    if not d:
+        fail("未配置知识库：在 ~/.claude/dispatch/config 写入 kb_dir=<目录>。")
+    d = os.path.expanduser(d).rstrip("/")
+    if not os.path.isdir(d):
+        fail(f"知识库目录不存在：{d}")
+    return d
+
+
+def report_kb(res, public_dirs):
+    print(f"白名单：{'、'.join(public_dirs)}（白名单外的目录不参与，也没有放行开关）")
+    if res.blocked:
+        print(f"── 未上传：敏感检查未通过（{len(res.blocked)} 篇）──")
+        for src, why, hits in res.blocked:
+            print(f"  {src} │ {why}")
+            for h in hits:
+                print(f"      {h[:180]}")
+    if res.opted_out:
+        print(f"── 未上传：笔记里写了 publish: false（{len(res.opted_out)} 篇）──")
+        for src in res.opted_out:
+            print(f"  {src}")
+    if res.no_images:
+        print(f"── 提醒：本地图片没有上传，页面上显示「（图片未公开）」（{len(res.no_images)} 篇）──")
+        for src in res.no_images:
+            print(f"  {src}")
+    if res.warnings:
+        print(f"── 提醒：内容里有这些字样，自行判断（{len(res.warnings)} 篇）──")
+        for src, hits in res.warnings:
+            print(f"  {src} │ " + " ； ".join(h.split("│")[1].strip() + "→" + h.split("│")[2].strip()
+                                              for h in hits if h.count("│") >= 2)[:200])
+
+
+def cmd_kb_sync(args):
+    dry = take_flag(args, "--dry-run")
+    push = not take_flag(args, "--no-push")
+    public_dirs = split_list(CFG.get("kb_public"))
+    if not public_dirs:
+        fail("没有配置公开白名单：在 ~/.claude/dispatch/config 写入 kb_public=<顶层目录,逗号分隔>，"
+             "例如 kb_public=个人项目,技术笔记。没有这一行时不会同步任何笔记。")
+    kb, repo = kb_dir(), repo_dir()
+    res = kbsite.sync(kb, repo, CFG, scan, dry_run=dry)
+    report_kb(res, public_dirs)
+    if dry:
+        print(f"（--dry-run，没有写入）会同步 {len(res.published)} 篇笔记：")
+        for n in res.published[:30]:
+            print(f"  {n.src} → {page_kb_url(n.slug)}")
+        return
+    cat = load_catalog(repo)
+    build_index(repo, cat)
+    changed = f"新增 {len(res.added)} · 更新 {len(res.updated)} · 下线 {len(res.removed)}"
+    n = len(res.published)
+    # 笔记没变、只是页面模板变了时，别把提交说成「新增 0 · 更新 0」
+    quiet = not (res.added or res.updated or res.removed)
+    commit_and_push(repo, f"知识库同步：重建页面（{n} 篇笔记）" if quiet else f"知识库同步：{n} 篇笔记（{changed}）", push)
+    print(f"✔ 已同步 {len(res.published)} 篇笔记（{changed}）")
+    for n in res.added + res.updated:
+        print(f"  {n.title} → {page_kb_url(n.slug)}")
+    print(f"  首页：{site_url() or repo}/    图谱：{site_url()}/graph/" if site_url() else f"  首页：{repo}")
+
+
+def page_kb_url(slug):
+    return f"{site_url()}/kb/{slug}/" if site_url() else f"kb/{slug}/"
 
 
 def cmd_hook(_args):
@@ -680,10 +877,10 @@ def main():
         repo_dir()
         print(site_url())
         return
-    handlers = {"check": cmd_check, "publish": cmd_publish, "list": cmd_list,
-                "search": cmd_search, "remove": cmd_remove, "rebuild": cmd_rebuild, "hook": cmd_hook}
+    handlers = {"check": cmd_check, "publish": cmd_publish, "list": cmd_list, "search": cmd_search,
+                "remove": cmd_remove, "rebuild": cmd_rebuild, "kb-sync": cmd_kb_sync, "hook": cmd_hook}
     if cmd not in handlers:
-        fail(f"未知子命令：{cmd}（可用：url、check、publish、list、search、remove、rebuild）")
+        fail(f"未知子命令：{cmd}（可用：url、check、publish、list、search、remove、rebuild、kb-sync）")
     handlers[cmd](rest)
 
 
