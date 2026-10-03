@@ -17,6 +17,7 @@ L1 起，回复第一行写判定：`〔L2 · 依据〕`。L0–L2 判定后直�
 - **L2**：范围不清先派 scout → 有未决问题则 `dispatch:grilling` 最多一轮 → Plan 模式出方案 → 按 `dispatch:test-driven-development` 实现 → 验证通过后按 `dispatch:code-review` 派 reviewer 审一次。
 - **L3**：`/dispatch:grill-me` → `/opsx:propose` → 用户审规格 → `/clear` → `/opsx:apply` 按任务组执行，每组做完按 `dispatch:code-review` 审一次，组与组之间 `/clear` → reviewer 终审一次（调用时指定 `model: opus`）→ `/opsx:verify` → `/opsx:archive`。项目没有 `openspec/` 时，建议运行 `/dispatch:setup`，或把方案写到 `docs/plans/`。
 - **L4**：`/opsx:explore` 定决策 → 拆成多个 L3 逐个走。真正独立的部分才并行，最多 3 路，需要 git worktree。
+- **界面改动**：L2、L3 改到前端界面时，在 `dispatch:code-review` 之外，再用 `impeccable`（已安装时）对改动的页面跑一次 `audit`：只修 P0/P1，不重新设计，修完不复审。
 
 ## 升降级
 执行中随时重判，调整时说明原因。

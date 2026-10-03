@@ -211,6 +211,8 @@ skills/           setup、note、brainstorm、grill-me、grilling、code-review�
 
 - bash；python3（解析 hook 输入和 `dispatch-kb` 用到；没有 python3 时，hook 退回到文本匹配，知识库和文档站功能不启用）。
 - [OpenSpec](https://github.com/Fission-AI/OpenSpec)（可选，L3 以上用到）：`npm i -g @fission-ai/openspec`，在项目里执行 `openspec init --tools claude`。
+- [Humanizer-zh](https://github.com/op7418/Humanizer-zh)（可选）：`npx skills add https://github.com/op7418/Humanizer-zh.git -g -a claude-code`。装了以后，`dispatch:note` 起草的笔记和发布到文档站的页面正文会先用它润色一遍。
+- [Impeccable](https://github.com/pbakaus/impeccable)（可选）：`npx skills add https://github.com/pbakaus/impeccable -g -a claude-code`。装了以后，L2/L3 改到前端界面时多一次 `audit`，文档站页面发布前多一次 `critique`，都只修 P0/P1。
 
 ## 许可
 
