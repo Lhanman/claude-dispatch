@@ -119,6 +119,20 @@ dispatch-kb outline 订单系统/订单导出改为分批流式写出.md  # 摘�
 
 没有配置知识库时，这部分规则不会注入会话，不占上下文。
 
+### 个人笔记库（可选，与知识库分开）
+
+同一套机制也能用来记跟人有关的事——经历、习惯、计划、学习、复盘。它和上面那个知识库是**两个互不检索的库**，分开配置，这样工程检索里不会混进生活笔记：
+
+```ini
+personal_dir=~/notes-personal   # 个人笔记库目录（按主题分二级目录）
+```
+
+配置后会话里会多一段个人区的规则：用户问起他自己的事时先 `dispatch-kb search <关键词> --personal`，说「记一下」时按 `dispatch:note` 写入。类型是 `记录` / `计划` / `学习` / `复盘`，frontmatter 里用 `topic` 代替 `project`。
+
+所有 `dispatch-kb` 子命令都接受 `--personal`（另有 `dispatch-kb personal-path`），其余用法和上面一致。个人库不参与文档站同步——`dispatch-pages kb-sync` 只读 `kb_dir`，所以个人库的目录即使写进 `kb_public` 也不会被发布。
+
+不配置 `personal_dir` 时，这段规则不注入会话，不占上下文。
+
 ## 文档站（可选）
 
 把生成的 HTML 文档（包括 Artifact 页面）发布到一个静态站点，例如 GitHub Pages，积累成一套可以浏览、搜索的文档库。站点首页按 `catalog.json` 和 `kb.json` 自动生成，支持搜索、按类别和标签筛选。
@@ -187,7 +201,7 @@ dispatch-pages kb-sync             # 全量同步：写入、更新、下线，�
 
 ## 常驻开销
 
-每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token；合计约 2.3k），加上各 skill 和 agent 的一行描述。查看实测值：
+每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了个人笔记库再加 `PERSONAL.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token；合计约 2.6k），加上各 skill 和 agent 的一行描述。查看实测值：
 
 ```bash
 claude plugin details dispatch
@@ -199,7 +213,7 @@ skill 的正文只在被调用时才加载。没有 `#L` 标记时，hook 不输
 
 ```
 .claude-plugin/   plugin.json、marketplace.json
-router/           ROUTER.md 路由规则；KB.md、PAGES.md 知识库和文档站规则（配置了才注入）
+router/           ROUTER.md 路由规则；KB.md、PERSONAL.md、PAGES.md 知识库、个人笔记库和文档站规则（配置了才注入）
 hooks/            hooks.json；session-start.sh 注入规则；prompt-submit.sh 识别 #L0–#L4；Artifact 发布后提示同步到文档站
 bin/              dispatch-verify、dispatch-kb、dispatch-pages，插件启用期间自动加入 PATH
 lib/              markdown_lite.py（笔记渲染）、kbsite.py（知识库同步、笔记页、知识图谱）

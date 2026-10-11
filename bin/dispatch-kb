@@ -5,7 +5,8 @@
 要打开时先看 outline，再只读需要的小节。整篇笔记不进上下文。
 
 用法：
-  dispatch-kb path                          打印知识库目录
+  dispatch-kb path                          打印工程知识库目录
+  dispatch-kb personal-path                 打印个人笔记库目录（没配置时以非 0 退出）
   dispatch-kb dirs                          列出顶层目录和各自的笔记数
   dispatch-kb search <词>... [-d 子目录] [-n 条数] [--all]
                                             按关键词找笔记。同一概念的几种说法用 | 连成一个词（报错|故障）；
@@ -14,14 +15,23 @@
   dispatch-kb list [子目录] [-n 条数]         列出笔记
   dispatch-kb outline <笔记路径>              打印摘要和标题大纲（带行号）
 
-配置：环境变量 DISPATCH_KB_DIR，或 ~/.claude/dispatch/config 里的
-  kb_dir=<知识库目录>
+每个子命令都接受 --personal，改从个人笔记库取：
+  dispatch-kb search 体检 --personal
+
+配置：环境变量 DISPATCH_KB_DIR / DISPATCH_PERSONAL_DIR，或 ~/.claude/dispatch/config 里的
+  kb_dir=<工程知识库目录>
+  personal_dir=<个人笔记库目录>              可选，不配就不注入个人区的规则
   kb_exclude=<不参与检索的顶层目录，逗号分隔>
 """
 import os
 import re
 import sys
 from datetime import date
+
+# 中文 Windows 下 stdout 默认按 GBK 编码，中文路径和摘要会写成乱码（而调用方按 UTF-8 读）。
+# 统一按 UTF-8 输出，跟知识库文件的编码一致。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 CONFIG = os.path.expanduser("~/.claude/dispatch/config")
 SUMMARY_WIDTH = 70
@@ -37,6 +47,8 @@ def load_config():
                     cfg[m.group(1)] = m.group(2)
     if os.environ.get("DISPATCH_KB_DIR"):
         cfg["kb_dir"] = os.environ["DISPATCH_KB_DIR"]
+    if os.environ.get("DISPATCH_PERSONAL_DIR"):
+        cfg["personal_dir"] = os.environ["DISPATCH_PERSONAL_DIR"]
     return cfg
 
 
@@ -48,14 +60,22 @@ def fail(msg):
 CFG = load_config()
 
 
-def kb_dir():
-    d = CFG.get("kb_dir")
+def _root(key, label, env):
+    d = CFG.get(key)
     if not d:
-        fail("未配置知识库：在 ~/.claude/dispatch/config 写入 kb_dir=<目录>，或设置环境变量 DISPATCH_KB_DIR。")
+        fail(f"未配置{label}：在 ~/.claude/dispatch/config 写入 {key}=<目录>，或设置环境变量 {env}。")
     d = os.path.expanduser(d)
     if not os.path.isdir(d):
-        fail(f"知识库目录不存在：{d}")
+        fail(f"{label}目录不存在：{d}")
     return d.rstrip("/")
+
+
+def kb_dir():
+    return _root("kb_dir", "知识库", "DISPATCH_KB_DIR")
+
+
+def personal_dir():
+    return _root("personal_dir", "个人笔记库", "DISPATCH_PERSONAL_DIR")
 
 
 def excluded():
@@ -296,8 +316,17 @@ def main():
     if not args or args[0] in ("-h", "--help", "help"):
         print(__doc__.strip())
         return
+    # --personal 可以出现在任意位置，改从个人笔记库取；其余子命令的行为不变
+    personal = "--personal" in args
+    args = [a for a in args if a != "--personal"]
+    if not args:
+        print(__doc__.strip())
+        return
     cmd, rest = args[0], args[1:]
-    root = kb_dir()
+    if cmd == "personal-path":
+        print(personal_dir())
+        return
+    root = personal_dir() if personal else kb_dir()
     if cmd == "path":
         print(root)
     elif cmd == "dirs":
@@ -309,7 +338,7 @@ def main():
     elif cmd == "outline":
         cmd_outline(root, rest)
     else:
-        fail(f"未知子命令：{cmd}（可用：path、dirs、search、list、outline）")
+        fail(f"未知子命令：{cmd}（可用：path、personal-path、dirs、search、list、outline）")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,8 @@ input="$(cat)"
 prompt="$input"
 session=""
 if command -v python3 >/dev/null 2>&1; then
-  parsed="$(printf '%s' "$input" | python3 -c 'import json,sys
+  # PYTHONIOENCODING：中文 Windows 上 stdin/stdout 默认是 GBK，会让中文提示词解析出错或写成乱码
+  parsed="$(printf '%s' "$input" | PYTHONIOENCODING=utf-8 python3 -c 'import json,sys
 try:
     d = json.load(sys.stdin)
     print(d.get("session_id", ""))

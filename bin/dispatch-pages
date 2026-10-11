@@ -48,6 +48,10 @@ import sys
 from datetime import date
 from urllib.parse import quote
 
+# 中文 Windows 下 stdout 默认按 GBK 编码，报告里的中文会写成乱码或直接抛 UnicodeEncodeError。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
 import kbsite  # noqa: E402
 
