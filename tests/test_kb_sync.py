@@ -253,6 +253,15 @@ class KbSyncTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.repo, "kb.json")))
         self.assertFalse(os.path.exists(os.path.join(self.repo, "知识库")))
 
+    def test_dry_run_reports_what_would_go_offline(self):
+        # 下线是最该在跑之前看见的一项，而它只能跟仓库里现有的页面比出来
+        self.sync()
+        os.remove(os.path.join(self.kb, "个人项目/demo/另一篇公开笔记.md"))
+        out = self.sync("--dry-run")
+        self.assertIn("下线 1", out)
+        self.assertIn("知识库/个人项目/demo/另一篇公开笔记.html", out)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "知识库/个人项目/demo/另一篇公开笔记.html")))
+
     def test_without_whitelist_nothing_is_synced(self):
         with open(self.config, encoding="utf-8") as f:
             text = f.read().replace("kb_public=个人项目,技术笔记\n", "")

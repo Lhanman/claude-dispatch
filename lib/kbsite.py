@@ -687,9 +687,9 @@ def sync(kb_root, repo, cfg, scan, dry_run=False):
     keep.sort(key=lambda n: (n.updated, n.slug), reverse=True)
     assign_paths(keep)
     result.published = keep
-    if dry_run:
-        return result
 
+    # 新增/更新/下线三份清单在 dry_run 里也要算出来——下线最需要提前看见，
+    # 而它恰好是只读不出来的（要跟仓库里现有的页面比）。渲染是纯计算，不落盘。
     old = {e_["src"]: e_ for e_ in load_kb(repo)}
     wanted = {}
     for n in keep:
@@ -708,10 +708,15 @@ def sync(kb_root, repo, cfg, scan, dry_run=False):
         for name in filenames:
             if name.endswith(".html"):
                 existing.add(os.path.relpath(os.path.join(dirpath, name), repo).replace(os.sep, "/"))
-    for rel in sorted(existing - set(wanted)):
+    gone = sorted(existing - set(wanted))
+
+    result.removed = gone
+    if dry_run:
+        return result
+
+    for rel in gone:
         os.remove(os.path.join(repo, rel))
         prune_empty(repo, rel)
-        result.removed.append(rel)
     for rel, page in wanted.items():
         full = os.path.join(repo, rel)
         os.makedirs(os.path.dirname(full), exist_ok=True)
