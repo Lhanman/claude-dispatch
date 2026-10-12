@@ -29,6 +29,7 @@ description: 规格或方案给用户看之前先自检：只写决策、补「�
 
 - `subagent_type`: `general-purpose`
 - `model`: `sonnet`
+- `run_in_background`: `false`。下一步取决于它的回传，后台运行只会多出一轮空等和一次重读上下文。
 - 不用 `dispatch:reviewer`：它审的是代码差异，不是规格。
 
 委托：

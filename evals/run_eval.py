@@ -29,7 +29,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENARIOS = os.path.join(ROOT, "evals", "scenarios")
 ALLOWED = ["Read", "Edit", "Write", "Glob", "Grep", "Task", "Skill",
            "Bash(python3:*)", "Bash(python:*)", "Bash(git:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(test:*)",
-           "Bash(tail:*)", "Bash(head:*)", "Bash(grep:*)", "Bash(wc:*)", "Bash(command:*)",
+           "Bash(tail:*)", "Bash(head:*)", "Bash(grep:*)", "Bash(wc:*)", "Bash(command:*)", "Bash(mkdir:*)",
            "Bash(dispatch-verify:*)", "Bash(dispatch-usage:*)"]
 
 
@@ -45,7 +45,7 @@ def load(name):
 def prepare(name):
     """把场景自带的 repo/ 拷到临时目录，初始化成 git 仓库并提交。"""
     work = tempfile.mkdtemp(prefix=f"dispatch-eval-{name}-")
-    src = os.path.join(SCENARIOS, name, "repo")
+    src = os.path.join(SCENARIOS, load(name).get("repo_from", name), "repo")
     if os.path.isdir(src):
         shutil.copytree(src, work, dirs_exist_ok=True)
     else:
@@ -75,7 +75,7 @@ def run_claude(prompt, cwd, plugin, model, max_turns, budget, plugin_dir):
 
 def summarize(events):
     """从事件流里取出检查要用的事实。只看主会话（parent_tool_use_id 为空）的消息。"""
-    s = {"first_line": None, "agents": [], "skills": [], "plugins": [], "result": {}}
+    s = {"first_line": None, "agents": [], "skills": [], "plugins": [], "result": {}, "results": []}
     for e in events:
         kind = e.get("type")
         if kind == "system" and e.get("subtype") == "init":
@@ -90,7 +90,11 @@ def summarize(events):
                     elif b.get("name") == "Skill":
                         s["skills"].append((b.get("input") or {}).get("skill"))
         elif kind == "result":
+            # 有后台子 agent 时，主 agent 先在"等子 agent"处结束一次，被通知唤醒后再结束一次，
+            # 一次运行就有多个 result 事件。total_cost_usd 和 modelUsage 是累计值，usage、num_turns、
+            # permission_denials 是按段算的，所以这里把每段都留着。
             s["result"] = e
+            s["results"].append(e)
     return s
 
 
@@ -126,19 +130,32 @@ def check(c, s, cwd):
 
 
 def usage(s):
-    r = s["result"]
-    u = r.get("usage") or {}
-    new = u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("output_tokens", 0)
-    return {"new": new, "cache_read": u.get("cache_read_input_tokens", 0), "output": u.get("output_tokens", 0),
-            "turns": r.get("num_turns", 0), "usd": r.get("total_cost_usd") or 0.0,
-            "denied": len(r.get("permission_denials") or [])}
+    """token 取最后一个 result 的 modelUsage：它是累计的，而且包含子 agent 用的模型；
+    顶层的 usage 只算主模型，按它统计会漏掉子 agent。轮数和权限拒绝按段，要加总。"""
+    rs = s["results"] or ([s["result"]] if s["result"] else [])
+    last = rs[-1] if rs else {}
+    models = (last.get("modelUsage") or {}).values()
+    if models:
+        inp = sum(m.get("inputTokens", 0) for m in models)
+        wr = sum(m.get("cacheCreationInputTokens", 0) for m in models)
+        rd = sum(m.get("cacheReadInputTokens", 0) for m in models)
+        out = sum(m.get("outputTokens", 0) for m in models)
+    else:  # 没有 modelUsage 的老版本：退回顶层 usage，按段加总
+        us = [r.get("usage") or {} for r in rs]
+        inp, wr = sum(u.get("input_tokens", 0) for u in us), sum(u.get("cache_creation_input_tokens", 0) for u in us)
+        rd, out = sum(u.get("cache_read_input_tokens", 0) for u in us), sum(u.get("output_tokens", 0) for u in us)
+    return {"new": inp + wr + out, "cache_read": rd, "output": out,
+            "turns": sum(r.get("num_turns", 0) for r in rs), "usd": last.get("total_cost_usd") or 0.0,
+            "denied": sum(len(r.get("permission_denials") or []) for r in rs)}
 
 
 def run_one(name, plugin, args, outdir):
     scn = load(name)
     cwd = prepare(name)
     t0 = time.time()
-    events, err = run_claude(scn["prompt"], cwd, plugin, args.model, args.max_turns, args.budget, args.plugin_dir)
+    prompt = scn["prompt"] if plugin else scn.get("baseline_prompt", scn["prompt"])
+    events, err = run_claude(prompt, cwd, plugin, args.model, scn.get("max_turns", args.max_turns),
+                             scn.get("budget", args.budget), args.plugin_dir)
     s = summarize(events)
     arm = "plugin" if plugin else "baseline"
     with open(os.path.join(outdir, f"{name}-{arm}-{int(t0)}.jsonl"), "w", encoding="utf-8") as fh:
@@ -151,7 +168,7 @@ def run_one(name, plugin, args, outdir):
         results.insert(0, ({"type": "plugin_loaded"}, False))
     shutil.rmtree(cwd, ignore_errors=True)
     return {"name": name, "arm": arm, "first_line": s["first_line"], "agents": s["agents"],
-            "denied": len(s["result"].get("permission_denials") or []), "checks": results, "usage": usage(s)}
+            "denied": usage(s)["denied"], "checks": results, "usage": usage(s)}
 
 
 def mean(rows, key):

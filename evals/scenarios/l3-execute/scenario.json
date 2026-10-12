@@ -1,0 +1,41 @@
+{
+  "description": "L3 执行阶段：规格已审完，应连续做完所有任务组、写账本、勾选 tasks.md、最后终审一次，而不是中途停下来问。",
+  "prompt": "#L3 openspec/changes/add-slugify 的规格已经审完，会话也 /clear 过了。按 dispatch:l3-execute 执行这个 change，做完所有任务组。项目里没有 openspec 命令，直接读 tasks.md 做就行。",
+  "max_turns": 60,
+  "budget": 2.0,
+  "checks": [
+    {
+      "type": "first_line_matches",
+      "pattern": "〔L3"
+    },
+    {
+      "type": "command_passes",
+      "cmd": "python3 -m unittest -q"
+    },
+    {
+      "type": "command_passes",
+      "cmd": "test \"$(python3 slug.py 'Hello World')\" = hello-world"
+    },
+    {
+      "type": "command_passes",
+      "cmd": "python3 slug.py >/dev/null 2>&1; test $? -eq 2"
+    },
+    {
+      "type": "command_passes",
+      "cmd": "grep -q '组 1' openspec/changes/add-slugify/progress.md && grep -q '组 2' openspec/changes/add-slugify/progress.md && grep -q '组 3' openspec/changes/add-slugify/progress.md"
+    },
+    {
+      "type": "command_passes",
+      "cmd": "! grep -q -- '- \\[ \\]' openspec/changes/add-slugify/tasks.md"
+    },
+    {
+      "type": "agent_type_called",
+      "agent": "dispatch:reviewer"
+    },
+    {
+      "type": "agent_calls_at_most",
+      "n": 2
+    }
+  ],
+  "baseline_prompt": "openspec/changes/add-slugify 的规格已经审完。把 tasks.md 里的任务全部做完，做完后在 tasks.md 里勾选。项目里没有 openspec 命令，直接读文件做就行。"
+}
