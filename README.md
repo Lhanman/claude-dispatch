@@ -2,7 +2,7 @@
 
 一个 Claude Code 插件：先判断任务有多复杂，再决定走多重的流程。小事直接做，大事才请出提问、规格文档和子 agent。
 
-与技术栈无关。项目特有的内容（构建和验证命令）由 `/dispatch:setup` 写进各项目自己的 CLAUDE.md，不放在插件里。
+与技术栈无关。项目特有的内容（构建和验证命令）由 `/dispatch:setup` 写进各项目自己的指令文件（Claude Code 的 CLAUDE.md，Codex 的 AGENTS.md），不放在插件里。
 
 ## 五个级别
 
@@ -94,6 +94,38 @@ claude plugin install dispatch@claude-dispatch
 4. 检查 OpenSpec 是否就绪（L3 以上用到）。没有的话，L3 会退回到把方案写进 `docs/plans/`。
 
 不执行 setup 也能用：路由规则会从构建文件推断验证命令。
+
+## 在 Codex 里使用
+
+同一个仓库也是 Codex 插件：`.codex-plugin/plugin.json` 加 `.agents/plugins/marketplace.json`，skill 和钩子是同一套。
+
+```bash
+codex plugin marketplace add Lhanman/claude-dispatch      # 也可以写本地路径
+codex plugin add dispatch@claude-dispatch
+```
+
+首次启动会请你批准插件的钩子：SessionStart 注入路由规则，UserPromptSubmit 识别 `#L0`–`#L4`。
+
+**子 agent 要多做一步。** Codex 的插件带不了子 agent，自定义 agent 是 `~/.codex/agents/` 下的 TOML 文件。运行一次：
+
+```bash
+<插件目录>/bin/dispatch-codex-setup --model scout=<便宜的模型> --effort reviewer=high
+```
+
+它把 scout、reviewer、builder 转成 `dispatch_scout` 等三个角色文件：没有 Write、Edit 的用 `read-only` 沙箱，builder 用 `workspace-write`。不内置任何模型名；不指定就继承主会话的模型，想省 token 就用 `--model` 指定便宜的，或在 `config.toml` 里设 `[agents] default_subagent_model`。`--dry-run` 先看会写什么，`--uninstall` 删掉它生成的文件。插件目录在 `~/.codex/plugins/cache/claude-dispatch/dispatch/<版本>/`，插件升级后重新运行一次。
+
+| 能力 | 在 Codex 里 |
+|---|---|
+| 10 个 skill（带 `dispatch:` 前缀） | 可用 |
+| 路由规则注入、`#L` 标记 | 用同一份钩子；钩子在 Codex 下多追加一段适配说明（`router/CODEX.md`，约 1k 字节）：命令行工具的绝对路径、`spawn_agent` 的用法、`/plan` `/new` 对应关系 |
+| 子 agent | 需要上面的 `dispatch-codex-setup` |
+| `dispatch-verify` 等命令行工具 | 不在 PATH 里，适配说明会告诉模型用绝对路径调用 |
+| 项目指令文件 | AGENTS.md（`/dispatch:setup` 会按当前工具写） |
+| OpenSpec | 命令名是 `$openspec-propose` 这一类，以 `openspec init` 打印的为准 |
+| `dispatch-usage`、`evals/` | **不支持**：前者读 Claude Code 的会话记录，后者驱动 `claude -p` |
+| 文档站的 Artifact 钩子 | Claude Code 专有，在 Codex 里不会触发 |
+
+**哪些验证过，哪些没有。** 验证过：用真实的 Codex CLI（0.162.1）执行 `plugin marketplace add` 和 `plugin add`；`codex debug prompt-input` 里能看到全部 10 个 `dispatch:` skill；钩子脚本在 Codex 形态的环境变量和输入下的行为（有单测）；角色文件能被 TOML 解析，字段名对照过 Codex 源码。**没验证**：真实 Codex 会话里钩子是否触发并把规则注入、`spawn_agent` 是否识别这些角色文件、模型是否按适配说明行动——这个环境没有 OpenAI 登录，跑不了真实会话。Codex 对钩子输出设了约 2,500 token 的上限（超了会写进临时文件、只给模型一个预览），`tests/test_skills.py` 守着开齐所有可选模块后的总量不超过这条线。
 
 ## 个人知识库（可选）
 

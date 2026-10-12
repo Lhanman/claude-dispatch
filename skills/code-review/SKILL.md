@@ -28,7 +28,9 @@ reviewer 不跑测试。验证没过就派，等于用它的上下文换一份�
 ## 取改动范围
 
 ```bash
-BASE=$(git rev-parse HEAD~1)     # 或任务组开始时的 SHA、origin/main
+BASE=$(git rev-parse HEAD~1)     # 只有一个提交时；跨多个提交，用任务组开始时记下的 SHA
+# 审整个分支：BASE=$(git merge-base origin/main HEAD)
+# 别直接用 origin/main：main 往前走之后，diff 会把 main 的新文件显示成被删除
 HEAD=$(git rev-parse HEAD)
 git diff --stat $BASE..$HEAD     # 先自己看一眼规模，确认范围没跑偏
 ```

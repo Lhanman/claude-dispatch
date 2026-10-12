@@ -1,10 +1,10 @@
 ---
 name: setup
-description: 为当前项目接入 dispatch 分级调度：探测构建方式，把各级别的验证命令写进项目 CLAUDE.md，并检查 git 与 OpenSpec 是否就绪。
+description: 为当前项目接入 dispatch 分级调度：探测构建方式，把各级别的验证命令写进项目指令文件（Claude Code 用 CLAUDE.md，Codex 用 AGENTS.md），并检查 git 与 OpenSpec 是否就绪。
 disable-model-invocation: true
 ---
 
-为**当前项目**接入 dispatch。dispatch 本身与技术栈无关，项目特有的事实只写进这个项目自己的 CLAUDE.md，不要改动插件里的任何文件。
+为**当前项目**接入 dispatch。dispatch 本身与技术栈无关，项目特有的事实只写进这个项目自己的指令文件，不要改动插件里的任何文件。指令文件按当前工具定：Claude Code 是 CLAUDE.md，Codex 是 AGENTS.md；项目里已有哪个就写哪个，两个都有就两个都写，一个都没有就按当前工具创建。下文的「CLAUDE.md」都指这个文件。
 
 ## 1. 探测构建方式
 

@@ -19,6 +19,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROUTER_MAX_BYTES = 4400        # router/ROUTER.md，每个会话必进上下文
 DESCRIPTIONS_MAX_CHARS = 1600  # 所有 skill 和 agent 的 description 合计，同样每个会话都在
 DESCRIPTION_MAX_CHARS = 300    # 单条描述上限
+# Codex 对钩子输出设了 2,500 token 的上限，按 4 字节一个 token 估算（codex-rs/utils/string 的 approx_token_count），
+# 约 10,000 字节；超了就整段写进临时文件，只给模型一个预览。SessionStart 在配齐所有可选模块后会输出
+# ROUTER + CODEX + KB + PERSONAL + PAGES，所以要给这五个文件的总和留余量。
+HOOK_OUTPUT_MAX_BYTES = 9600
 
 
 def read(path):
@@ -80,6 +84,12 @@ class ReferenceTest(unittest.TestCase):
             for name in re.findall(r"dispatch:([a-z][a-z0-9-]*)", read(path)):
                 self.assertIn(name, known, f"{os.path.relpath(path, ROOT)} 引用了不存在的 dispatch:{name}")
 
+    def test_no_leftover_superpowers_references(self):
+        # 从 superpowers 引入的 skill 要把 superpowers:xxx 改成本插件里存在的东西，否则模型会去调一个不存在的 skill
+        for path in glob.glob(os.path.join(ROOT, "skills", "**", "*.md"), recursive=True):
+            m = re.search(r"superpowers:[a-z][a-z-]*", read(path))
+            self.assertIsNone(m, f"{os.path.relpath(path, ROOT)} 里还有 {m and m.group(0)} 引用")
+
     def test_bin_tools_exist(self):
         for path in self.sources():
             for tool in set(re.findall(r"\bdispatch-([a-z]+)\b", read(path))):
@@ -92,6 +102,11 @@ class AlwaysOnBudgetTest(unittest.TestCase):
     def test_router_size(self):
         size = os.path.getsize(os.path.join(ROOT, "router", "ROUTER.md"))
         self.assertLessEqual(size, ROUTER_MAX_BYTES, f"ROUTER.md 有 {size} 字节，超出预算 {ROUTER_MAX_BYTES}：每个会话都要为它付 token")
+
+    def test_all_router_modules_fit_in_codex_hook_output(self):
+        total = sum(os.path.getsize(p) for p in glob.glob(os.path.join(ROOT, "router", "*.md")))
+        self.assertLessEqual(total, HOOK_OUTPUT_MAX_BYTES,
+                             f"router/*.md 合计 {total} 字节，超出 Codex 钩子输出上限的预算 {HOOK_OUTPUT_MAX_BYTES}")
 
     def test_descriptions_total(self):
         total = sum(len(frontmatter(p)["description"]) for p in skills() + agents())

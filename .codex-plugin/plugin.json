@@ -1,0 +1,27 @@
+{
+  "name": "dispatch",
+  "version": "0.10.0",
+  "description": "按任务复杂度把工作分成 L0–L4 五级，匹配对应的流程、子 agent 和模型；与技术栈无关，面向省 token 的使用方式。",
+  "author": {
+    "name": "lhanboyy",
+    "email": "liujiahaoda@gmail.com"
+  },
+  "homepage": "https://github.com/Lhanman/claude-dispatch",
+  "repository": "https://github.com/Lhanman/claude-dispatch",
+  "license": "MIT",
+  "keywords": ["workflow", "routing", "subagents", "openspec", "token-frugal"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "dispatch 分级调度",
+    "shortDescription": "先判断任务有多复杂，再决定走多重的流程",
+    "longDescription": "按任务复杂度分成 L0–L4 五级：小事直接做，大事才请出提问、规格自检、进度账本、子 agent 和独立审查。验证输出走摘要，长日志不进上下文。",
+    "developerName": "lhanboyy",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "#L1 修一下这个 bug",
+      "给这个特性出规格并分级执行"
+    ],
+    "websiteURL": "https://github.com/Lhanman/claude-dispatch"
+  }
+}

@@ -100,7 +100,7 @@
 
 ## 这些变化借鉴自哪里
 
-流程层面借鉴了 [superpowers](https://github.com/obra/superpowers) 6.2–6.4 的几个做法（只借思路，没有拷贝代码）：
+流程层面借鉴了 [superpowers](https://github.com/obra/superpowers) 6.2–6.4 的几个做法（只借思路，没有拷贝代码；对照的是 v7.0.0，bb92a77。省 token 的改动集中在 6.2.0 到 6.4.2，7.0.0 本身重做的是 brainstorming）：
 
 - Native 执行：连续做完整个计划，只在最后对整个分支终审一次，取代逐任务审查。
 - 计划只记录决策，不转录代码。
