@@ -11,7 +11,7 @@
 | L0 直做 | 一句话能说清的改动 | 直接改，跑最小验证 |
 | L1 快修 | 位置明确的 bug 或小功能，不超过 3 个文件 | 三行意图 → 修 bug 先写复现测试 → 改 → 验证 |
 | L2 标准 | 跨模块、需求有歧义、新依赖，或碰到公共接口、数据模型、并发、删除 | scout（按需）→ 最多一轮提问 → Plan 模式 → 测试先行 → 验证 → reviewer 审一次 |
-| L3 特性 | 一个会话做不完；改公共接口、持久化格式；新增完整能力 | grill-me → OpenSpec 提案 → 你审阅 → 分任务组执行，每组审一次 → Opus 终审 → 归档 |
+| L3 特性 | 一个会话做不完；改公共接口、持久化格式；新增完整能力 | grill-me → OpenSpec 提案（只写决策，不贴代码）→ 你审阅 → 连续做完所有任务组，只对高风险的组加审 → Opus 终审整个分支 → 归档 |
 | L4 史诗 | 新子系统或大改造 | 先定架构决策 → 拆成多个 L3 |
 
 - 级别按**风险最高的那个信号**定，不按平均值。
@@ -32,7 +32,7 @@
 |---|---|---|
 | 主会话 | 由你的设置决定 | 所有任务 |
 | `dispatch:scout` | Haiku 4.5，只读，不加载 CLAUDE.md | 要读 5 个以上文件，或进入不熟悉的区域 |
-| `dispatch:reviewer` | Sonnet 5；L3 终审时指定为 Opus 5 | L2 验证通过后一次；L3 每个任务组一次、交付前终审一次。只看改动差异，只报正确性问题和遗漏的需求 |
+| `dispatch:reviewer` | Sonnet 5；L3 终审时指定为 Opus 5 | L2 验证通过后一次；L3 碰公共接口、持久化、并发、删除的任务组各一次，交付前对整个分支终审一次。只看改动差异，只报正确性问题和遗漏的需求 |
 | `dispatch:builder` | Sonnet 5 | 规格明确的机械性任务组，或 L4 的并行分支 |
 | 验证 | 不用模型 | `dispatch-verify` 脚本 |
 
@@ -46,6 +46,17 @@
 | Opus 5 xhigh | 本插件的编制 | 约 28% |
 | Opus 5 medium | 本插件的编制，builder 常用 | 约 23% |
 | Sonnet 5 | 本插件的编制 | 约 12% |
+
+这张表的基线是"所有子 agent 继承主模型"，不是"不用工作流"。省下的部分来自子 agent 用便宜模型，这一点不装插件、只设 `CLAUDE_CODE_SUBAGENT_MODEL` 也能做到。流程本身（提问、规格、审查）是额外开销：按自底向上的估算（假设见 [docs/token-estimate.md](docs/token-estimate.md)，不是实测），相对"一个会话直接做完"，L2 新增 token 约多 1.4 倍，L3 约 1.7 倍（0.8.0 之前每组都审，约 2.1 倍）。要知道你自己的数字，用下面的 `dispatch-usage`。
+
+### 看实际用量
+
+```bash
+dispatch-usage                     # 当前目录最近一次会话
+dispatch-usage a.jsonl b.jsonl     # 同一类任务，用工作流和不用各跑一次，直接对比
+```
+
+读 `~/.claude/projects/` 下的会话记录，按模型和子 agent 分行，列新输入、缓存写、缓存读、输出和"新增合计"（新输入 + 缓存写 + 输出，与价格无关），并附上 Claude Code 自带的 `costUSD` 汇总。同一次回复在记录里按内容块拆成多行、每行都带同一份用量，脚本按 `message.id` 去重，不会多算。长会话里缓存读取占大头，它随轮数增长：这也是 L3 不再为审查反复 `/clear`、也不再逐组审查的原因之一。
 
 ### 建议的全局设置（可选，插件不会替你改）
 
@@ -201,7 +212,7 @@ dispatch-pages kb-sync             # 全量同步：写入、更新、下线，�
 
 ## 常驻开销
 
-每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了个人笔记库再加 `PERSONAL.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token；合计约 2.6k），加上各 skill 和 agent 的一行描述。查看实测值：
+每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了个人笔记库再加 `PERSONAL.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token；合计约 2.8k），加上各 skill 和 agent 的一行描述。查看实测值：
 
 ```bash
 claude plugin details dispatch
@@ -215,7 +226,7 @@ skill 的正文只在被调用时才加载。没有 `#L` 标记时，hook 不输
 .claude-plugin/   plugin.json、marketplace.json
 router/           ROUTER.md 路由规则；KB.md、PERSONAL.md、PAGES.md 知识库、个人笔记库和文档站规则（配置了才注入）
 hooks/            hooks.json；session-start.sh 注入规则；prompt-submit.sh 识别 #L0–#L4；Artifact 发布后提示同步到文档站
-bin/              dispatch-verify、dispatch-kb、dispatch-pages，插件启用期间自动加入 PATH
+bin/              dispatch-verify、dispatch-usage、dispatch-kb、dispatch-pages，插件启用期间自动加入 PATH
 lib/              markdown_lite.py（笔记渲染）、kbsite.py（知识库同步、笔记页、知识图谱）
 agents/           scout、reviewer、builder
 skills/           setup、note、brainstorm、grill-me、grilling、code-review、test-driven-development、systematic-debugging
