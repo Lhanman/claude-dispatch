@@ -49,7 +49,7 @@
 | Opus 5 medium | 本插件的编制，builder 常用 | 约 23% |
 | Sonnet 5 | 本插件的编制 | 约 12% |
 
-这张表的基线是"所有子 agent 继承主模型"，不是"不用工作流"。省下的部分来自子 agent 用便宜模型，这一点不装插件、只设 `CLAUDE_CODE_SUBAGENT_MODEL` 也能做到。流程本身（提问、规格、审查）是额外开销：按自底向上的估算（假设见 [docs/token-estimate.md](docs/token-estimate.md)，不是实测），相对"一个会话直接做完"，L2 新增 token 约多 1.4 倍，L3 约 1.7 倍（0.8.0 之前每组都审，约 2.1 倍）。要知道你自己的数字，用下面的 `dispatch-usage`。
+这张表的基线是"所有子 agent 继承主模型"，不是"不用工作流"。省下的部分来自子 agent 用便宜模型，这一点不装插件、只设 `CLAUDE_CODE_SUBAGENT_MODEL` 也能做到。流程本身（提问、规格、审查）是额外开销。按自底向上的估算（假设见 [docs/token-estimate.md](docs/token-estimate.md)），一个任务的新增 token 是"一个会话直接做完"的：L2 约 1.4 倍，L3 约 1.8 倍（0.7.1 时约 2.1 倍）。这是估算；小任务上有实测：没有流程可摊的 L0、L1 任务，启用插件反而多花约一半的新增 token，原因和数字见 `docs/token-estimate.md` 的"实测"一节。要知道你自己的数字，用下面的 `dispatch-usage` 和 [`evals/`](evals/README.md)。
 
 ### 看实际用量
 
@@ -214,7 +214,7 @@ dispatch-pages kb-sync             # 全量同步：写入、更新、下线，�
 
 ## 常驻开销
 
-每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了个人笔记库再加 `PERSONAL.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token；合计约 2.8k），加上各 skill 和 agent 的一行描述。查看实测值：
+每个会话固定增加的上下文：`ROUTER.md` 全文（配置了知识库时再加 `KB.md` 约 250 token，配置了个人笔记库再加 `PERSONAL.md` 约 250 token，配置了文档站再加 `PAGES.md` 约 100 token；合计约 2.8k），加上各 skill 和 agent 的一行描述。实测（`evals/`，`l0-typo` 场景每组 5 次）：启用 0.9.0 比不加载插件的首轮多约 2.8k 新增 token（0.7.1 约 2.5k），每个会话付一次，在小任务上相当于多花约一半的新增 token。查看实测值：
 
 ```bash
 claude plugin details dispatch
