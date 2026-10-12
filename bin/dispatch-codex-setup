@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""dispatch-codex-setup：把 agents/*.md 转成 Codex 的子 agent 角色文件。
+
+Codex 的插件能带 skill 和钩子，但带不了子 agent：自定义 agent 是 ~/.codex/agents/ 下的 TOML 文件。
+这个脚本读本插件的 scout、reviewer、builder，各生成一个 dispatch_<名字>.toml。
+
+用法：
+  dispatch-codex-setup                           生成到 ${CODEX_HOME:-~/.codex}/agents/
+  dispatch-codex-setup --dry-run                 只打印会写什么，不落盘
+  dispatch-codex-setup --model scout=<模型名>     给某个角色指定模型（可重复）；不指定就继承主会话的模型
+  dispatch-codex-setup --effort reviewer=high    给某个角色指定推理强度 low|medium|high（可重复）
+  dispatch-codex-setup --dir <目录>               写到别处
+  dispatch-codex-setup --force                   覆盖不是本脚本生成的同名文件
+  dispatch-codex-setup --uninstall               删掉本脚本生成的文件
+
+不内置任何模型名：Codex 可选的模型随版本变，写死了迟早过期。想让 scout 用便宜的模型，就自己传 --model，
+或者在 config.toml 里设 [agents] default_subagent_model。
+
+沙箱按 agent 文件里的 tools 推：没有 Write、Edit 的（scout、reviewer）用 read-only，其余用 workspace-write。
+插件升级后缓存目录会变，重新运行一次，让文件里的脚本路径跟上。
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+MARKER = "# dispatch-codex-setup:generated"
+EFFORTS = ("low", "medium", "high")
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def codex_home():
+    return os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+
+
+def parse_agent(path):
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    m = re.match(r"---\n(.*?)\n---\n(.*)", text, re.S)
+    if not m:
+        raise ValueError(f"{path} 缺少 frontmatter")
+    fields = {}
+    for line in m.group(1).splitlines():
+        k, sep, v = line.partition(":")
+        if sep:
+            fields[k.strip()] = v.strip()
+    return fields, m.group(2).strip()
+
+
+def plugin_version():
+    try:
+        with open(os.path.join(ROOT, ".claude-plugin", "plugin.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("version", "?")
+    except (OSError, ValueError):
+        return "?"
+
+
+def toml_str(value):
+    # JSON 的字符串转义是 TOML 基本字符串的子集；ensure_ascii=False 保留中文
+    return json.dumps(value, ensure_ascii=False)
+
+
+def toml_multiline(value):
+    if "'''" not in value:
+        return "'''\n" + value + "\n'''"
+    return '"""\n' + value.replace("\\", "\\\\").replace('"""', '\\"\\"\\"') + '\n"""'
+
+
+def render(name, fields, body, model, effort):
+    role = f"dispatch_{name}"
+    tools = [t.strip() for t in fields.get("tools", "").split(",") if t.strip()]
+    writes = not tools or any(t in ("Write", "Edit") for t in tools)
+    lines = [MARKER + f"（dispatch {plugin_version()}）。重新运行会覆盖本文件；要手改，先删掉这一行。",
+             f"name = {toml_str(role)}",
+             f"description = {toml_str(fields['description'])}",
+             f'sandbox_mode = "{"workspace-write" if writes else "read-only"}"']
+    if model:
+        lines.append(f"model = {toml_str(model)}")
+    effort = effort or (fields.get("effort") if fields.get("effort") in EFFORTS else None)
+    if effort:
+        lines.append(f'model_reasoning_effort = "{effort}"')
+    if "dispatch-verify" in body:
+        body += (f"\n\n在 Codex 里，`dispatch-verify` 不在 PATH 里，用绝对路径调用：`{os.path.join(ROOT, 'bin', 'dispatch-verify')}`。")
+    lines.append("developer_instructions = " + toml_multiline(body))
+    return role, "\n".join(lines) + "\n"
+
+
+def is_ours(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.readline().startswith(MARKER)
+    except OSError:
+        return False
+
+
+def key_values(items, flag):
+    out = {}
+    for item in items or []:
+        k, sep, v = item.partition("=")
+        if not sep or not k or not v:
+            sys.exit(f"{flag} 需要 角色=值 的形式，收到：{item}")
+        out[k] = v
+    return out
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dir")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--uninstall", action="store_true")
+    ap.add_argument("--model", action="append")
+    ap.add_argument("--effort", action="append")
+    args = ap.parse_args(argv)
+
+    out_dir = args.dir or os.path.join(codex_home(), "agents")
+    agents_dir = os.path.join(ROOT, "agents")
+    names = sorted(f[:-3] for f in os.listdir(agents_dir) if f.endswith(".md"))
+    models, efforts = key_values(args.model, "--model"), key_values(args.effort, "--effort")
+    for k in list(models) + list(efforts):
+        if k not in names:
+            sys.exit(f"没有这个角色：{k}（可选：{', '.join(names)}）")
+    for k, v in efforts.items():
+        if v not in EFFORTS:
+            sys.exit(f"--effort 只接受 {'|'.join(EFFORTS)}，收到：{v}")
+
+    status = 0
+    for name in names:
+        target = os.path.join(out_dir, f"dispatch_{name}.toml")
+        if args.uninstall:
+            if os.path.exists(target) and (is_ours(target) or args.force):
+                print(f"{'将删除' if args.dry_run else '已删除'}：{target}")
+                if not args.dry_run:
+                    os.remove(target)
+            elif os.path.exists(target):
+                print(f"跳过（不是本脚本生成的）：{target}")
+            continue
+        fields, body = parse_agent(os.path.join(agents_dir, f"{name}.md"))
+        _, text = render(name, fields, body, models.get(name), efforts.get(name))
+        if os.path.exists(target) and not is_ours(target) and not args.force:
+            print(f"跳过（已有同名文件，不是本脚本生成的；确认要覆盖请加 --force）：{target}")
+            status = 1
+            continue
+        print(f"{'将写入' if args.dry_run else '已写入'}：{target}")
+        if not args.dry_run:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(target, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(text)
+
+    if not args.uninstall:
+        unset = [n for n in names if n not in models]
+        if unset:
+            print(f"\n没有为 {', '.join(unset)} 指定模型，它们会继承主会话的模型。想省 token，用 --model 指定便宜的，"
+                  "或在 config.toml 里设 [agents] default_subagent_model。")
+        print("多 agent 在较新的 Codex 里默认开启；旧版本需要在 config.toml 里写 [features] multi_agent = true。")
+    return status
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.exit(main(sys.argv[1:]))

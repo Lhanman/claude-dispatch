@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""dispatch-usage：从 Claude Code 的会话记录里汇总 token 用量，用来比较"用工作流"和"不用"。
+
+用法：
+  dispatch-usage                       当前目录最近一次会话
+  dispatch-usage <会话.jsonl>...        指定会话；给多个时末尾多一张对比表
+
+会话记录在 ~/.claude/projects/<目录名>/<会话id>.jsonl（设了 CLAUDE_CONFIG_DIR 则在那里）。
+
+怎么算：
+  - 记录里同一次模型回复会按内容块拆成多行，每行都带同一份 usage，按 message.id 去重后才不会多算。
+  - 新增 = 新输入 + 缓存写入 + 输出（与价格无关，可以直接比较）；缓存读取单列，它随轮数和上下文大小增长，
+    单价很低，但 L3 这类长会话里占大头。
+  - 子 agent 的用量取自主会话里 Agent 工具的返回值（带 agentId 和 usage 的那种），没有就不显示这一块。
+  - 记录里若有 cost-state（Claude Code 自己的汇总，含按模型的用量和 costUSD），一并列出，
+    它是写入那一刻的快照，进行中的会话会落后一点。
+"""
+import glob
+import json
+import os
+import re
+import sys
+
+FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def config_dir():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+
+
+def latest_session():
+    slug = re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
+    files = glob.glob(os.path.join(config_dir(), "projects", slug, "*.jsonl"))
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def merge_max(dst, usage):
+    for f in FIELDS:
+        dst[f] = max(dst.get(f, 0), int(usage.get(f) or 0))
+
+
+def analyze(path):
+    msgs = {}      # message.id -> {model, 各字段}
+    agents = {}    # agentId -> {desc, 各字段}
+    cost_state = None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            kind = d.get("type")
+            if kind == "assistant":
+                m = d.get("message") or {}
+                usage = m.get("usage")
+                if isinstance(usage, dict) and m.get("id"):
+                    rec = msgs.setdefault(m["id"], {"model": m.get("model") or "?"})
+                    merge_max(rec, usage)
+            elif kind == "user":
+                r = d.get("toolUseResult")
+                if isinstance(r, dict) and r.get("agentId") and isinstance(r.get("usage"), dict):
+                    rec = agents.setdefault(r["agentId"], {"desc": None})
+                    if rec["desc"] is None:
+                        first = (r.get("description") or r.get("agentType") or (r.get("prompt") or "").split("\n")[0])
+                        rec["desc"] = (first or r["agentId"])[:40]
+                    merge_max(rec, r["usage"])
+            elif kind == "cost-state":
+                cost_state = d
+    return msgs, agents, cost_state
+
+
+def total(rows):
+    t = {f: 0 for f in FIELDS}
+    t["n"] = 0
+    for r in rows:
+        t["n"] += 1
+        for f in FIELDS:
+            t[f] += r.get(f, 0)
+    return t
+
+
+def fresh(t):
+    return t["input_tokens"] + t["cache_creation_input_tokens"] + t["output_tokens"]
+
+
+def fmt(n):
+    return f"{n:,}"
+
+
+def show(path):
+    msgs, agents, cost = analyze(path)
+    print(f"会话 {os.path.basename(path)}")
+    head = f"{'':<30}{'轮数':>6}{'新输入':>10}{'缓存写':>10}{'缓存读':>13}{'输出':>9}{'新增合计':>11}"
+    print(head)
+
+    def row(label, t):
+        print(f"{label:<30}{t['n']:>6}{fmt(t['input_tokens']):>10}{fmt(t['cache_creation_input_tokens']):>10}"
+              f"{fmt(t['cache_read_input_tokens']):>13}{fmt(t['output_tokens']):>9}{fmt(fresh(t)):>11}")
+
+    by_model = {}
+    for r in msgs.values():
+        by_model.setdefault(r["model"], []).append(r)
+    main_all = total(msgs.values())
+    for model in sorted(by_model):
+        row(f"主会话 · {model}"[:30], total(by_model[model]))
+    grand = dict(main_all)
+    for aid in sorted(agents):
+        a = agents[aid]
+        t = total([a])
+        row(f"子 agent · {a['desc']}"[:30], t)
+        for f in FIELDS:
+            grand[f] += t[f]
+        grand["n"] += 1
+    row("合计", grand)
+    if cost:
+        print("Claude Code 自带汇总（含子 agent，快照）：")
+        for model, u in sorted((cost.get("modelUsage") or {}).items()):
+            print(f"  {model}: 新输入 {fmt(u.get('inputTokens', 0))} · 缓存写 {fmt(u.get('cacheCreationInputTokens', 0))}"
+                  f" · 缓存读 {fmt(u.get('cacheReadInputTokens', 0))} · 输出 {fmt(u.get('outputTokens', 0))}"
+                  f" · ${u.get('costUSD', 0):.4f}")
+        print(f"  合计 ${cost.get('totalCostUSD', 0):.4f}")
+    print()
+    return grand, (cost or {}).get("totalCostUSD")
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
+    paths = argv or [latest_session()]
+    if not paths[0]:
+        print("找不到会话记录：在项目目录下运行，或把 .jsonl 路径作为参数传进来。", file=sys.stderr)
+        return 1
+    results = []
+    for p in paths:
+        if not os.path.isfile(p):
+            print(f"没有这个文件：{p}", file=sys.stderr)
+            return 1
+        results.append((p, *show(p)))
+    if len(results) > 1:
+        print("对比")
+        print(f"{'会话':<40}{'新增合计':>12}{'缓存读':>14}{'输出':>10}{'自带汇总 $':>12}")
+        for p, t, usd in results:
+            print(f"{os.path.basename(p)[:38]:<40}{fmt(fresh(t)):>12}{fmt(t['cache_read_input_tokens']):>14}"
+                  f"{fmt(t['output_tokens']):>10}{('%.4f' % usd) if usd is not None else '-':>12}")
+    return 0
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.exit(main(sys.argv[1:]))

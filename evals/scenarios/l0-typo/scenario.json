@@ -1,0 +1,10 @@
+{
+  "description": "一句话能说清的改动（L0）：不应出现判定行，不应派子 agent。",
+  "prompt": "把 README.md 里的拼写错误 recieve 改成 receive。",
+  "checks": [
+    {"type": "first_line_not_matches", "pattern": "〔L"},
+    {"type": "agent_calls_at_most", "n": 0},
+    {"type": "file_contains", "path": "README.md", "text": "receive"},
+    {"type": "file_not_contains", "path": "README.md", "text": "recieve"}
+  ]
+}

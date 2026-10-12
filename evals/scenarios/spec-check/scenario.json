@@ -1,0 +1,14 @@
+{
+  "description": "规格自检：应补「审查重点」，并派一个 sonnet 的 general-purpose 子 agent 做实现者视角通读；自检阶段不实现任何东西。",
+  "repo_from": "l3-execute",
+  "prompt": "#L3 刚用 /opsx:propose 写完 openspec/changes/add-slugify 的规格。按 dispatch:spec-check 自检一遍，告诉我结论。这一轮不要开始实现。",
+  "max_turns": 30,
+  "budget": 1.0,
+  "checks": [
+    {"type": "first_line_matches", "pattern": "〔L3"},
+    {"type": "agent_type_called", "agent": "general-purpose"},
+    {"type": "agent_calls_at_most", "n": 2},
+    {"type": "command_passes", "cmd": "grep -rq '审查重点' openspec/changes/add-slugify"},
+    {"type": "command_passes", "cmd": "test ! -f slug.py"}
+  ]
+}

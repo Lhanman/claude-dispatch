@@ -5,12 +5,27 @@
 # 用法：dispatch-verify <命令...>
 #   dispatch-verify npm test
 #   dispatch-verify "make lint && make test"
+#   dispatch-verify --record <账本文件> <标签> <命令...>
+#       命令通过时，往账本追加一行（时间 · 标签 · 提交 · 命令）；失败不写。
+#       L3 用它记任务组的完成情况：上下文被清掉后，凭账本续做，不重做已完成的组。
 # 环境变量：
 #   DISPATCH_VERIFY_TAIL   失败时回显末尾多少行（默认 40；通过时固定只回显 8 行）
 #   DISPATCH_VERIFY_ERRORS 最多回显多少条报错行（默认 30）
 
+record_file=""
+record_label=""
+if [ "${1:-}" = "--record" ]; then
+  if [ "$#" -lt 4 ]; then
+    echo "用法：dispatch-verify --record <账本文件> <标签> <命令...>" >&2
+    exit 2
+  fi
+  record_file="$2"
+  record_label="$3"
+  shift 3
+fi
+
 if [ "$#" -eq 0 ]; then
-  echo "用法：dispatch-verify <命令...>" >&2
+  echo "用法：dispatch-verify [--record <账本文件> <标签>] <命令...>" >&2
   exit 2
 fi
 
@@ -44,4 +59,12 @@ if [ "$lines" -gt 0 ]; then
   tail -n "$tail_n" "$log" | cut -c1-300
 fi
 echo "完整日志：$log"
+
+if [ "$code" -eq 0 ] && [ -n "$record_file" ]; then
+  mkdir -p "$(dirname "$record_file")"
+  sha="$(git rev-parse --short HEAD 2>/dev/null || echo -)"
+  cmd="$*"
+  printf '%s · %s · %s · ✔ %s\n' "$(date '+%Y-%m-%d %H:%M')" "$record_label" "$sha" "${cmd:0:120}" >>"$record_file"
+  echo "已记入账本：$record_file"
+fi
 exit "$code"
