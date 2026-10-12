@@ -1,0 +1,9 @@
+{
+  "description": "只检查级别判定：软删除 + 改公共接口 + 数据迁移，应判为 L2 或 L3，且在判定后没有动手改任何东西。",
+  "prompt": "给订单表加软删除：新增 deleted_at 字段，把现有的 DELETE 接口改成软删除，所有查询默认过滤已删除的订单，并给存量数据写迁移。这一轮先只告诉我你的级别判定和依据，不要改任何文件。",
+  "checks": [
+    {"type": "first_line_matches", "pattern": "〔L[23]"},
+    {"type": "agent_calls_at_most", "n": 0},
+    {"type": "command_passes", "cmd": "test -z \"$(git status --porcelain)\""}
+  ]
+}

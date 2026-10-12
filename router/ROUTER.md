@@ -14,8 +14,8 @@ L1 起，回复第一行写判定：`〔L2 · 依据〕`。L0–L2 判定后直�
 ## 流程
 - **L0**：直接改，跑最小验证。
 - **L1**：先写三行意图（目标 / 不做什么 / 验收标准）。修 bug 先写能复现的测试；原因不明时用 `dispatch:systematic-debugging`。
-- **L2**：范围不清先派 scout → 有未决问题则 `dispatch:grilling` 最多一轮 → Plan 模式出方案 → 按 `dispatch:test-driven-development` 实现 → 验证通过后按 `dispatch:code-review` 派 reviewer 审一次。
-- **L3**：`/dispatch:grill-me` → `/opsx:propose`（只写决策：签名、断言、规格里的值，不贴实现代码）→ 用户审规格 → `/clear` → `/opsx:apply` 连续做完所有任务组，每组 `dispatch-verify` 通过即进下一组（进度看 tasks.md 勾选）；仅碰公共接口、持久化、并发、删除的任务组做完后按 `dispatch:code-review` 加审一次，用户要求逐组审则每组都审 → reviewer 终审整个分支一次（`model: opus`）→ `/opsx:verify` → `/opsx:archive`。项目没有 `openspec/` 时，建议运行 `/dispatch:setup`，或把方案写到 `docs/plans/`。
+- **L2**：范围不清先派 scout → 有未决问题则 `dispatch:grilling` 最多一轮 → Plan 模式出方案（末尾按 `dispatch:spec-check` 补审查重点）→ 按 `dispatch:test-driven-development` 实现 → 验证通过后按 `dispatch:code-review` 派 reviewer 审一次。
+- **L3**：`/dispatch:grill-me` → `/opsx:propose` → `dispatch:spec-check` → 用户审规格 → `/clear` → `/opsx:apply`，按 `dispatch:l3-execute` 执行（连续做完，只审高风险任务组，最后终审整个分支）→ `/opsx:verify` → `/opsx:archive`。项目没有 `openspec/` 时，建议运行 `/dispatch:setup`，或把方案写到 `docs/plans/`。
 - **L4**：`/opsx:explore` 定决策 → 拆成多个 L3 逐个走。真正独立的部分才并行，最多 3 路，需要 git worktree。
 - **界面改动**：L2、L3 改到前端界面时，在 `dispatch:code-review` 之外，再用 `impeccable`（已安装时）对改动的页面跑一次 `audit`：只修 P0/P1，不重新设计，修完不复审。
 
@@ -33,7 +33,7 @@ L1 起，回复第一行写判定：`〔L2 · 依据〕`。L0–L2 判定后直�
 
 ## 验证
 命令取自项目 CLAUDE.md 的「dispatch 验证矩阵」。没有这一节时，从构建文件推断，并建议运行 `/dispatch:setup`。
-一律通过 `dispatch-verify <命令>` 执行：完整日志写入文件，只回显结果摘要。验证没通过，不得声称完成。
+一律通过 `dispatch-verify <命令>` 执行：完整日志写入文件，只回显结果摘要。L2 起收尾时跑矩阵里 L2 那一行（全量测试），不只跑改动涉及的测试文件；失败一律如实列出，包括不是你造成的。验证没通过，不得声称完成。
 
 ## 上下文卫生
-无关任务之间 `/clear`；到里程碑 `/compact`；同一问题纠正两次无效，就 `/clear` 重来。L3 连续执行不为审查而 `/clear`，上下文过半再 `/compact`。给子 agent 的内容和回传都会常驻上下文：长材料写成文件只传路径；执行时工具调用之间最多一行叙述。
+无关任务之间 `/clear`；到里程碑 `/compact`；同一问题纠正两次无效，就 `/clear` 重来。给子 agent 的内容和回传都会常驻上下文：长材料写成文件只传路径。

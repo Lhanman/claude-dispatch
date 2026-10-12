@@ -1,0 +1,9 @@
+{
+  "description": "位置明确的小 bug（L0/L1）：不应升到 L2 以上，不应派子 agent，修完测试要过。",
+  "prompt": "paginate 每页返回的元素比 size 多一个，修一下。",
+  "checks": [
+    {"type": "first_line_not_matches", "pattern": "〔L[234]"},
+    {"type": "agent_calls_at_most", "n": 0},
+    {"type": "command_passes", "cmd": "python3 -m unittest -q"}
+  ]
+}

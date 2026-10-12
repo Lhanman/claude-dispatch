@@ -10,8 +10,8 @@
 |---|---|---|
 | L0 直做 | 一句话能说清的改动 | 直接改，跑最小验证 |
 | L1 快修 | 位置明确的 bug 或小功能，不超过 3 个文件 | 三行意图 → 修 bug 先写复现测试 → 改 → 验证 |
-| L2 标准 | 跨模块、需求有歧义、新依赖，或碰到公共接口、数据模型、并发、删除 | scout（按需）→ 最多一轮提问 → Plan 模式 → 测试先行 → 验证 → reviewer 审一次 |
-| L3 特性 | 一个会话做不完；改公共接口、持久化格式；新增完整能力 | grill-me → OpenSpec 提案（只写决策，不贴代码）→ 你审阅 → 连续做完所有任务组，只对高风险的组加审 → Opus 终审整个分支 → 归档 |
+| L2 标准 | 跨模块、需求有歧义、新依赖，或碰到公共接口、数据模型、并发、删除 | scout（按需）→ 最多一轮提问 → Plan 模式（附审查重点）→ 测试先行 → 全量验证 → reviewer 审一次 |
+| L3 特性 | 一个会话做不完；改公共接口、持久化格式；新增完整能力 | grill-me → OpenSpec 提案 → 规格自检（审查重点 + 实现者视角通读）→ 你审阅 → 连续做完所有任务组（账本记进度，歧义自己裁决），只对高风险的组加审 → Opus 终审整个分支 → 归档 |
 | L4 史诗 | 新子系统或大改造 | 先定架构决策 → 拆成多个 L3 |
 
 - 级别按**风险最高的那个信号**定，不按平均值。
@@ -36,7 +36,9 @@
 | `dispatch:builder` | Sonnet 5 | 规格明确的机械性任务组，或 L4 的并行分支 |
 | 验证 | 不用模型 | `dispatch-verify` 脚本 |
 
-`dispatch-verify <命令>` 执行验证命令，把完整日志写入临时文件，只回显退出码、报错行和末尾几行。构建和测试的长输出不进入上下文。
+`dispatch-verify <命令>` 执行验证命令，把完整日志写入临时文件，只回显退出码、报错行和末尾几行。构建和测试的长输出不进入上下文。L2 起收尾时跑验证矩阵里的全量测试，失败一律如实列出，包括不是你造成的。
+
+`dispatch-verify --record <账本> <标签> <命令>` 在命令通过时往账本追加一行，L3 用它记任务组的完成情况：`/clear` 或压缩之后凭账本续做，不重做已完成的组。
 
 各模型方案的相对消耗（用 API 价格作权重估算，只用于比较高低）：
 
@@ -229,7 +231,10 @@ hooks/            hooks.json；session-start.sh 注入规则；prompt-submit.sh 
 bin/              dispatch-verify、dispatch-usage、dispatch-kb、dispatch-pages，插件启用期间自动加入 PATH
 lib/              markdown_lite.py（笔记渲染）、kbsite.py（知识库同步、笔记页、知识图谱）
 agents/           scout、reviewer、builder
-skills/           setup、note、brainstorm、grill-me、grilling、code-review、test-driven-development、systematic-debugging
+skills/           setup、note、brainstorm、grill-me、grilling、spec-check、l3-execute、code-review、test-driven-development、systematic-debugging
+tests/            脚本的单元测试，另有 skill 和路由规则的静态检查（test_skills.py，含常驻开销预算）
+evals/            行为 eval：用真实的 claude -p 会话检查路由和用量，见 evals/README.md
+docs/             方案文档；token-estimate.md 是 token 开销的估算和实测
 ```
 
 ## 依赖
