@@ -2,7 +2,7 @@
 name: scout
 description: 只读检索。要读 5 个以上文件、梳理调用链，或进入不熟悉的代码区域时使用，用来替主会话消化大量读取；小范围查找不要用它，直接 Grep。
 tools: Read, Grep, Glob
-model: haiku
+model: claude-haiku-5-5
 maxTurns: 12
 omitClaudeMd: true
 color: cyan
